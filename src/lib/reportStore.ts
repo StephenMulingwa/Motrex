@@ -48,6 +48,12 @@ function tripMetric(row: Record<string, unknown>, column: string): string | null
   return String(direct);
 }
 
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
 async function upsertDedicatedReport(result: ReportExecutionResult): Promise<void> {
   const db = getDb();
   const rows = result.payload.rows ?? [];
@@ -137,16 +143,17 @@ async function upsertDedicatedReport(result: ReportExecutionResult): Promise<voi
   if (result.reportType === "eco_driving") {
     await db.delete(motrexEcoDriving).where(eq(motrexEcoDriving.reportDate, result.reportDate));
     if (!rows.length) return;
-    await db.insert(motrexEcoDriving).values(
-      rows.map((row) => ({
+    const values = rows.map((row) => ({
         reportDate: result.reportDate,
         registrationNumber: registrationLabel(String(row.grouping ?? normalizeRegistration(row))),
         violation: String(row.violation ?? ""),
         count: Number(row.count ?? 0),
         rawRow: row,
         updatedAt: now,
-      })),
-    );
+    }));
+    for (const batch of chunks(values, 5000)) {
+      await db.insert(motrexEcoDriving).values(batch);
+    }
   }
 }
 
