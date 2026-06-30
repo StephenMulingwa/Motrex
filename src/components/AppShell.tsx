@@ -361,12 +361,14 @@ export default function AppShell({ onLogout, initialLiveData = null }: AppShellP
           </button>
           <TripsSummaryTab />
         </div>
-        <div style={{ display: reportsView === "map" ? "block" : "none" }}>
-          <button type="button" onClick={() => setReportsView("home")} style={backButtonStyle}>
-            Back to Reports
-          </button>
-          <MapTab data={data} loading={loading} error={error} onRefresh={refresh} />
-        </div>
+        {reportsView === "map" && (
+          <div>
+            <button type="button" onClick={() => setReportsView("home")} style={backButtonStyle}>
+              Back to Reports
+            </button>
+            <MapTab data={data} loading={loading} error={error} onRefresh={refresh} />
+          </div>
+        )}
       </div>
     );
   };
