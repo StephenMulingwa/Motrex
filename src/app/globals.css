@@ -1,0 +1,771 @@
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=JetBrains+Mono:wght@400;600&display=swap');
+
+@import "tailwindcss";
+
+:root {
+  --bg: #f2f7ff;
+  --surface: #ffffff;
+  --surface2: #eef4ff;
+  --border: #d9e5ff;
+  --border2: #c4d7ff;
+  --accent: #c41e3a;
+  --accent2: #e63946;
+  --accent-glow: rgba(196, 30, 58, 0.16);
+  --green: #0ea46f;
+  --red: #e64949;
+  --blue: #2f6fed;
+  --text: #11284d;
+  --text2: #4d6488;
+  --text3: #7d8fab;
+  --font-head: 'Syne', sans-serif;
+  --font-body: 'DM Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 10px 26px rgba(32, 76, 146, 0.08);
+  --transition: all 0.22s cubic-bezier(.4, 0, .2, 1);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-body);
+  background: linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    radial-gradient(circle at 20% 20%, rgba(47,111,237,0.06), transparent 40%),
+    radial-gradient(circle at 80% 10%, rgba(245,179,0,0.10), transparent 35%),
+    radial-gradient(circle at 70% 80%, rgba(47,111,237,0.05), transparent 35%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: #eff4ff; }
+::-webkit-scrollbar-thumb { background: #bfd0ef; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #9db6df; }
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .5; transform: scale(0.75); }
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-16px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes fleet-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* —— Login hero animations (mirrors the legacy "simera-hero" ones) —— */
+@keyframes ena-hero-zoom {
+  0% { transform: scale(1) translate3d(0, 0, 0); }
+  50% { transform: scale(1.06) translate3d(-1.2%, -0.6%, 0); }
+  100% { transform: scale(1) translate3d(0, 0, 0); }
+}
+
+@keyframes ena-hero-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 0.95; }
+}
+
+@keyframes ena-hero-sheen {
+  0% { transform: translateX(-120%) skewX(-12deg); opacity: 0; }
+  20% { opacity: 0.9; }
+  60% { opacity: 0.9; }
+  100% { transform: translateX(260%) skewX(-12deg); opacity: 0; }
+}
+
+@keyframes ena-hero-float {
+  0%, 100% { transform: translateY(0); box-shadow: 0 14px 30px rgba(17, 40, 77, 0.10); }
+  50% { transform: translateY(-4px); box-shadow: 0 22px 40px rgba(17, 40, 77, 0.16); }
+}
+
+.ena-hero-img {
+  animation: ena-hero-zoom 22s ease-in-out infinite;
+  will-change: transform;
+}
+
+.ena-hero-overlay {
+  animation: ena-hero-pulse 9s ease-in-out infinite;
+  will-change: opacity;
+}
+
+.ena-hero-sheen {
+  animation: ena-hero-sheen 7s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.ena-hero-float {
+  animation: ena-hero-float 5.5s ease-in-out infinite;
+  will-change: transform, box-shadow;
+}
+
+.ena-fade-up {
+  animation: fadeUp 0.55s cubic-bezier(.4, 0, .2, 1) both;
+}
+
+/* Login page: single-screen lock (matches Hass login.html rhythm) */
+.login-root {
+  min-height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+}
+@media (max-width: 1023px) {
+  .login-root {
+    max-height: none;
+    min-height: 100dvh;
+    overflow-y: auto;
+  }
+}
+
+/* Login two-column grid: SSR-safe (CSS-only, no JS flash on reload) */
+.login-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 1024px) {
+  .login-grid {
+    grid-template-columns: 1.25fr minmax(320px, 480px);
+  }
+}
+
+/* Hero (left) panel: hidden on small screens, shown on desktop */
+.login-hero {
+  display: none;
+}
+@media (min-width: 1024px) {
+  .login-hero {
+    display: block;
+  }
+}
+
+/* Form (right) panel padding tweaks for narrow viewports */
+.login-form-panel {
+  padding: 32px 20px;
+}
+@media (min-width: 1024px) {
+  .login-form-panel {
+    padding: 32px 40px;
+  }
+}
+
+@keyframes card-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.card-rise {
+  animation: card-rise 0.5s cubic-bezier(.2, .8, .2, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ena-hero-img,
+  .ena-hero-overlay,
+  .ena-hero-sheen,
+  .ena-hero-float,
+  .ena-fade-up,
+  .card-rise {
+    animation: none !important;
+  }
+}
+
+.page-header-root {
+  margin-bottom: 28px;
+  gap: 16px;
+}
+
+/* Wide Recharts / plot areas: horizontal scroll inside tab content */
+.tab-chart-scroll {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Dashboard bar chart: wrapped X labels may extend slightly below plot */
+.tab-chart-scroll--dashboard-chart {
+  overflow-y: visible;
+}
+
+/* Keep horizontal chart scroll from chaining to the page / main */
+.tab-chart-scroll--dashboard-isolate {
+  overscroll-behavior-x: contain;
+}
+
+/* Tables: horizontal scroll on desktop (mobile rules extend this in the media query below) */
+.data-table-scroll {
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.fleet-map-label.leaflet-tooltip {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(15, 40, 90, 0.2);
+  border-radius: 999px;
+  box-shadow: 0 6px 18px rgba(15, 40, 90, 0.16);
+  color: #0b2f85;
+  font-family: var(--font-head);
+  font-size: 0.68rem;
+  font-weight: 800;
+  padding: 3px 8px;
+}
+
+.fleet-map-label.leaflet-tooltip-left::before,
+.fleet-map-label.leaflet-tooltip-right::before {
+  display: none;
+}
+
+.leaflet-container {
+  font-family: var(--font-body), Arial, sans-serif;
+}
+
+.leaflet-popup-content-wrapper {
+  border-radius: 12px;
+}
+
+/* Dashboard: tables scroll vertically + horizontally inside the card */
+.dashboard-table-panel {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  max-height: min(52vh, 500px);
+  overflow-x: auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
+/* Table panels: horizontal scroll stays inside the card, not the dashboard page */
+.dashboard-table-panel--h-scroll {
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
+}
+
+/* Fleet Dashboard: no horizontal page scroll; inner panels handle overflow */
+.dashboard-root {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
+/* —— Responsive: tab pages (stack titles + date filter, scroll tables) —— */
+@media (max-width: 900px) {
+  .page-header-root {
+    flex-direction: column;
+    align-items: stretch;
+    margin-bottom: 10px;
+    gap: 8px;
+  }
+
+  .page-header-title {
+    flex-grow: 0;
+    flex-shrink: 1;
+    flex-basis: auto;
+  }
+
+  .page-header-right {
+    width: 100%;
+    max-width: 100%;
+    justify-content: flex-end !important;
+    flex-grow: 0 !important;
+    flex-shrink: 1 !important;
+    flex-basis: auto !important;
+  }
+
+  .date-filter-row {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 5px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+
+  .date-filter-pair {
+    flex-grow: 1;
+    flex-shrink: 1;
+    flex-basis: 0;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .date-filter-row .date-filter-label {
+    flex-grow: 0;
+    flex-shrink: 0;
+    flex-basis: auto;
+  }
+
+  .date-filter-pair input.date-filter-input[type="datetime-local"] {
+    min-width: 0;
+    flex-grow: 1;
+    flex-shrink: 1;
+    flex-basis: 0;
+    max-width: none;
+    font-size: 0.64rem !important;
+    padding: 2px 4px !important;
+    height: 32px;
+    min-height: 30px;
+    max-height: 32px;
+    line-height: 1.12;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  .date-filter-row button {
+    width: auto;
+    flex-grow: 0;
+    flex-shrink: 0;
+    flex-basis: auto;
+    padding: 5px 10px !important;
+    font-size: 0.68rem !important;
+    white-space: nowrap;
+  }
+
+  .data-table-scroll {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin-left: 0;
+    border-radius: var(--radius-sm);
+  }
+}
+
+/* —— App shell header (mobile / installed PWA) —— */
+@media (max-width: 900px), (display-mode: standalone) {
+  .app-shell-header {
+    padding-top: max(calc(12px + env(safe-area-inset-top, 0px)), 28px) !important;
+  }
+}
+
+/* —— PWA install page (/install) —— */
+.install-page {
+  position: relative;
+  z-index: 1;
+  min-height: 100dvh;
+}
+
+.install-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: calc(18px + env(safe-area-inset-top, 0px)) 20px 18px;
+  padding-left: max(20px, env(safe-area-inset-left, 0px));
+  padding-right: max(20px, env(safe-area-inset-right, 0px));
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(10px);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.install-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-decoration: none;
+  color: var(--text);
+}
+
+.install-brand strong {
+  display: block;
+  font-family: var(--font-head);
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.install-brand span {
+  display: block;
+  font-family: var(--font-head);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text2);
+  margin-top: 2px;
+}
+
+.install-brand-logo {
+  border-radius: 12px;
+  object-fit: contain;
+}
+
+.install-header-link {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.install-main {
+  width: min(720px, 100%);
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.install-hero,
+.install-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 24px 22px;
+  box-shadow: var(--shadow);
+}
+
+.install-app-icon-wrap {
+  width: 88px;
+  height: 88px;
+  border-radius: 22px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(145deg, #0b2f85 0%, #1a4bb8 100%);
+  box-shadow: 0 12px 28px rgba(11, 47, 133, 0.28);
+  margin-bottom: 16px;
+}
+
+.install-app-icon {
+  border-radius: 16px;
+  object-fit: contain;
+}
+
+.install-hero h1,
+.install-card h2 {
+  font-family: var(--font-head);
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.install-hero h1 {
+  font-size: clamp(1.45rem, 4vw, 1.9rem);
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.install-card h2 {
+  font-size: 1.15rem;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.install-lead {
+  margin-top: 10px;
+  color: var(--text2);
+  line-height: 1.6;
+  font-size: 0.94rem;
+}
+
+.install-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.install-tag {
+  font-family: var(--font-head);
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(245, 179, 0, 0.35);
+  background: rgba(245, 179, 0, 0.12);
+  color: var(--text);
+}
+
+.install-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.install-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 13px 16px;
+  border-radius: var(--radius);
+  font-family: var(--font-head);
+  font-size: 0.9rem;
+  font-weight: 800;
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition: var(--transition);
+  cursor: pointer;
+}
+
+.install-btn--primary {
+  background: linear-gradient(90deg, rgba(245, 179, 0, 1) 0%, rgba(255, 212, 81, 0.95) 100%);
+  border-color: rgba(245, 179, 0, 0.45);
+  color: #14110c;
+  box-shadow: 0 6px 24px rgba(245, 179, 0, 0.32);
+}
+
+.install-btn--primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.install-btn--ghost {
+  background: var(--surface2);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.install-status {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text2);
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+}
+
+.install-status--success {
+  color: var(--green);
+  border-color: rgba(14, 164, 111, 0.28);
+  background: rgba(14, 164, 111, 0.08);
+}
+
+.install-hint,
+.install-muted,
+.install-tip {
+  font-size: 0.84rem;
+  color: var(--text2);
+  line-height: 1.55;
+}
+
+.install-hint {
+  margin-top: -4px;
+}
+
+.install-muted {
+  margin-bottom: 14px;
+}
+
+.install-qr {
+  display: block;
+  margin: 0 auto 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #fff;
+}
+
+.install-qr--placeholder {
+  width: 220px;
+  height: 220px;
+  margin-inline: auto;
+  background: var(--surface2);
+}
+
+.install-url {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--text2);
+  word-break: break-all;
+  margin-bottom: 14px;
+}
+
+.install-share-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.install-share-btn {
+  font-family: var(--font-head);
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 9px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.install-share-btn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.install-steps {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.install-steps h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-head);
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+
+.install-step-badge {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: #0b2f85;
+  color: #fff;
+  font-size: 0.82rem;
+}
+
+.install-step-badge--ios {
+  background: #111827;
+}
+
+.install-steps ol {
+  margin-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--text2);
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+
+.install-tip {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  border: 1px dashed var(--border2);
+}
+
+.install-benefits {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 8px;
+}
+
+.install-benefits li {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.install-benefit-icon {
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.install-benefits h4 {
+  font-family: var(--font-head);
+  font-size: 0.92rem;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.install-benefits p {
+  margin-top: 2px;
+  font-size: 0.86rem;
+  color: var(--text2);
+  line-height: 1.5;
+}
+
+.install-footer {
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--text3);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+}
+
+.install-footer a {
+  color: var(--blue);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.install-powered {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text2);
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+@media (min-width: 768px) {
+  .install-main {
+    padding-top: 32px;
+  }
+}
+
+.fleet-map-label.leaflet-tooltip {
+  background: rgba(11, 47, 133, 0.94);
+  color: #fff;
+  border: 1px solid rgba(245, 179, 0, 0.55);
+  font-family: var(--font-head);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(11, 47, 133, 0.25);
+  white-space: nowrap;
+}
+.fleet-map-label.leaflet-tooltip-left::before {
+  border-left-color: rgba(11, 47, 133, 0.94);
+}
+.fleet-map-label.leaflet-tooltip-right::before {
+  border-right-color: rgba(11, 47, 133, 0.94);
+}
+
+/* Leaflet map (Reports → Map) */
+.leaflet-container {
+  font-family: var(--font-body);
+}
+.leaflet-popup-content-wrapper {
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}

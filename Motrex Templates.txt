@@ -1,0 +1,35 @@
+    {
+        "group_id": 26659458,
+        "group_name": "Motrex All Vehicles",
+        "units_count": 609
+    }
+
+    {
+        "resource_name": "Motrex Limited",
+        "resource_id": 26054231,
+        "template_id": "55",
+        "template_name": "SM_Motrex_Online Status"
+    }
+    {
+        "resource_name": "Motrex Limited",
+        "resource_id": 26054231,
+        "template_id": "56",
+        "template_name": "SM_Motrex_Yards"
+    }
+
+    {
+        "resource_name": "Motrex Limited",
+        "resource_id": 26054231,
+        "template_id": "15",
+        "template_name": "Motrex - Group Trips to Athi River/Tororo"
+    }
+
+
+
+
+I want "SM_Motrex_Yards" and "Motrex - Group Trips to Athi River/Tororo" to first execute for the June till yesterday and store in the cloud database. Next, every midnight 00:00 hours you will be running a cron job to execute for the previous day and add to the clod database for the previous day.
+This will be for the 2 reports and also for the ones in the Track3 Large fleet.ipynb file. Utilization and Eco Driving.
+
+
+
+ 
