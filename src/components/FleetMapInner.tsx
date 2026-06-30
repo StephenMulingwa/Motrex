@@ -90,23 +90,6 @@ export default function FleetMapInner({ units }: FleetMapInnerProps) {
         </span>
       </div>
 
-      {!units.length && (
-        <p
-          style={{
-            margin: 0,
-            padding: "10px 14px",
-            borderRadius: "var(--radius-sm)",
-            background: "rgba(245,179,0,0.12)",
-            border: "1px solid rgba(245,179,0,0.35)",
-            color: "var(--text)",
-            fontSize: ".82rem",
-            fontWeight: 600,
-          }}
-        >
-          No vehicles with valid GPS coordinates for this live monitor load.
-        </p>
-      )}
-
       <div
         style={{
           overflow: "hidden",

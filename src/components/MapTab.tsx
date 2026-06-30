@@ -22,6 +22,7 @@ interface MapTabProps {
 export default function MapTab({ data, loading, error, onRefresh }: MapTabProps) {
   const [statusFilter, setStatusFilter] = useState("");
   const [vehicleSearch, setVehicleSearch] = useState("");
+  const [showVehicles, setShowVehicles] = useState(false);
 
   const mapUnits = useMemo((): FleetMapUnit[] => {
     const seen = new Set<string>();
@@ -49,6 +50,7 @@ export default function MapTab({ data, loading, error, onRefresh }: MapTabProps)
   }, [data?.rows]);
 
   const filteredUnits = useMemo(() => {
+    if (!showVehicles) return [];
     const query = vehicleSearch.trim().toLowerCase();
     return mapUnits.filter((unit) => {
       if (query && !unit.registrationNumber.toLowerCase().includes(query)) return false;
@@ -56,7 +58,7 @@ export default function MapTab({ data, loading, error, onRefresh }: MapTabProps)
       if (statusFilter === "stationary" && unit.speedKmh > 0) return false;
       return true;
     });
-  }, [mapUnits, statusFilter, vehicleSearch]);
+  }, [mapUnits, showVehicles, statusFilter, vehicleSearch]);
 
   return (
     <div style={{ width: "100%", maxWidth: "100%", minWidth: 0 }}>
@@ -104,7 +106,28 @@ export default function MapTab({ data, loading, error, onRefresh }: MapTabProps)
           <option value="moving">Moving</option>
           <option value="stationary">Stationary</option>
         </select>
+        <button
+          type="button"
+          onClick={() => setShowVehicles((current) => !current)}
+          disabled={loading || !mapUnits.length}
+          style={{
+            padding: "8px 14px",
+            borderRadius: 8,
+            border: "1px solid var(--border)",
+            background: showVehicles ? "var(--surface2)" : "var(--accent)",
+            color: showVehicles ? "var(--text)" : "#1a1200",
+            fontWeight: 700,
+            cursor: loading || !mapUnits.length ? "wait" : "pointer",
+          }}
+        >
+          {showVehicles ? "Hide vehicles" : "Show vehicles"}
+        </button>
       </div>
+      {!showVehicles && (
+        <p style={{ margin: "0 0 12px", color: "var(--text2)", fontSize: ".82rem", fontWeight: 600 }}>
+          Map loaded without vehicle markers for best performance. Click “Show vehicles” when you want to display the fleet.
+        </p>
+      )}
       <FleetMapInner units={filteredUnits} />
     </div>
   );
