@@ -42,6 +42,23 @@ function FitBounds({ units }: { units: { lat: number; lon: number }[] }) {
   return null;
 }
 
+function MapReady() {
+  const map = useMap();
+
+  useEffect(() => {
+    const timers = [0, 150, 500].map((delay) =>
+      window.setTimeout(() => {
+        map.invalidateSize();
+      }, delay),
+    );
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [map]);
+
+  return null;
+}
+
 export default function FleetMapInner({ units }: FleetMapInnerProps) {
   const center = useMemo(() => {
     if (!units.length) return DEFAULT_CENTER;
@@ -49,12 +66,13 @@ export default function FleetMapInner({ units }: FleetMapInnerProps) {
     const lon = units.reduce((sum, u) => sum + u.lon, 0) / units.length;
     return [lat, lon] as [number, number];
   }, [units]);
+  const showPermanentLabels = units.length > 0 && units.length <= 120;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
         <p style={{ margin: 0, fontSize: ".86rem", color: "var(--text2)", fontWeight: 500, maxWidth: 620 }}>
-          Live positions from SM_Motrex_Online Status. Registration labels sit beside each dot; tap a dot for full details.
+          Live positions from SM_Motrex_Online Status. Tap or hover a dot for the registration and full details.
         </p>
         <span
           style={{
@@ -102,12 +120,14 @@ export default function FleetMapInner({ units }: FleetMapInnerProps) {
           center={center}
           zoom={units.length ? 8 : 6}
           style={{ height: "min(62vh, 620px)", minHeight: 420, width: "100%", zIndex: 0 }}
-          scrollWheelZoom
+          preferCanvas
+          scrollWheelZoom={false}
         >
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
+          <MapReady />
           <FitBounds units={units} />
           {units.map((unit) => {
             const colors = markerColors(unit);
@@ -115,7 +135,7 @@ export default function FleetMapInner({ units }: FleetMapInnerProps) {
               <CircleMarker
                 key={unit.id}
                 center={[unit.lat, unit.lon]}
-                radius={10}
+                radius={8}
                 pathOptions={{
                   color: colors.color,
                   weight: 2,
@@ -123,7 +143,7 @@ export default function FleetMapInner({ units }: FleetMapInnerProps) {
                   fillOpacity: 0.92,
                 }}
               >
-                <Tooltip permanent direction="right" offset={[10, 0]} className="fleet-map-label">
+                <Tooltip permanent={showPermanentLabels} direction="right" offset={[10, 0]} className="fleet-map-label">
                   {unit.registrationNumber}
                 </Tooltip>
                 <Popup>

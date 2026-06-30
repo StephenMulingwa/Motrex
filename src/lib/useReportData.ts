@@ -7,13 +7,14 @@ import {
   getUtilizationDefaultRange,
   getYardsDefaultRange,
 } from "@/lib/dateRange";
-import type { StoredReportType } from "@/lib/motrexConfig";
+import { STORED_REPORT_TYPES, type StoredReportType } from "@/lib/motrexConfig";
 
 export interface ReportApiResponse {
   reportType: string;
   from: string;
   to: string;
   snapshotCount: number;
+  totalRows?: number;
   rows: Record<string, unknown>[];
   pivot: Record<string, Record<string, number>>;
   columns: string[];
@@ -38,13 +39,55 @@ function defaultRangeForType(reportType: StoredReportType): { from: string; to: 
   }
 }
 
+function reportCacheKey(reportType: StoredReportType, from: string, to: string): string {
+  return `${reportType}:${from}:${to}`;
+}
+
+function fetchReportData(reportType: StoredReportType, from: string, to: string): Promise<ReportApiResponse> {
+  const cacheKey = reportCacheKey(reportType, from, to);
+  const cached = reportCache.get(cacheKey);
+  if (cached) return Promise.resolve(cached);
+
+  const existingRequest = reportRequests.get(cacheKey);
+  if (existingRequest) return existingRequest;
+
+  const query = new URLSearchParams({ from, to });
+  const request = fetch(`/api/reports/${reportType}?${query.toString()}`, { cache: "no-store" })
+    .then(async (res) => {
+      if (!res.ok) {
+        const payload = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? `Request failed (${res.status})`);
+      }
+      return res.json() as Promise<ReportApiResponse>;
+    })
+    .then((payload) => {
+      reportCache.set(cacheKey, payload);
+      return payload;
+    })
+    .finally(() => {
+      reportRequests.delete(cacheKey);
+    });
+
+  reportRequests.set(cacheKey, request);
+  return request;
+}
+
+export function preloadDefaultReports(): Promise<ReportApiResponse[]> {
+  return Promise.all(
+    STORED_REPORT_TYPES.map((reportType) => {
+      const range = defaultRangeForType(reportType);
+      return fetchReportData(reportType, range.from, range.to);
+    }),
+  );
+}
+
 export function useReportData(reportType: StoredReportType) {
   const defaults = defaultRangeForType(reportType);
   const [fromDate, setFromDate] = useState(defaults.from);
   const [toDate, setToDate] = useState(defaults.to);
   const [appliedFrom, setAppliedFrom] = useState(fromDate);
   const [appliedTo, setAppliedTo] = useState(toDate);
-  const initialCacheKey = `${reportType}:${defaults.from}:${defaults.to}`;
+  const initialCacheKey = reportCacheKey(reportType, defaults.from, defaults.to);
   const [data, setData] = useState<ReportApiResponse | null>(() => reportCache.get(initialCacheKey) ?? null);
   const [loading, setLoading] = useState(() => !reportCache.has(initialCacheKey));
   const [error, setError] = useState<string | null>(null);
@@ -54,12 +97,12 @@ export function useReportData(reportType: StoredReportType) {
     setError(null);
     setAppliedFrom(fromDate);
     setAppliedTo(toDate);
-  }, [fromDate, toDate]);
+  }, [fromDate, setAppliedFrom, setAppliedTo, setError, setLoading, toDate]);
 
   useEffect(() => {
     let cancelled = false;
 
-    const cacheKey = `${reportType}:${appliedFrom}:${appliedTo}`;
+    const cacheKey = reportCacheKey(reportType, appliedFrom, appliedTo);
     const cached = reportCache.get(cacheKey);
     if (cached) {
       Promise.resolve().then(() => {
@@ -74,29 +117,14 @@ export function useReportData(reportType: StoredReportType) {
       };
     }
 
-    const query = new URLSearchParams({ from: appliedFrom, to: appliedTo });
-    const request =
-      reportRequests.get(cacheKey) ??
-      fetch(`/api/reports/${reportType}?${query.toString()}`, { cache: "no-store" })
-      .then(async (res) => {
-        if (!res.ok) {
-          const payload = (await res.json().catch(() => ({}))) as { error?: string };
-          throw new Error(payload.error ?? `Request failed (${res.status})`);
-        }
-        return res.json() as Promise<ReportApiResponse>;
-      });
-    reportRequests.set(cacheKey, request);
-
-    request
+    fetchReportData(reportType, appliedFrom, appliedTo)
       .then((payload) => {
-        reportCache.set(cacheKey, payload);
         if (!cancelled) setData(payload);
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load report.");
       })
       .finally(() => {
-        reportRequests.delete(cacheKey);
         if (!cancelled) setLoading(false);
       });
 

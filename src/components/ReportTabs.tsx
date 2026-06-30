@@ -352,7 +352,7 @@ function ReportTabShell({
         )}
         {data && (
           <p style={{ fontSize: ".72rem", color: "var(--text3)", marginTop: 12 }}>
-            {data.snapshotCount} day snapshot(s) loaded from Neon · {data.rows.length} row(s)
+            {data.snapshotCount} day snapshot(s) loaded from Neon · {data.totalRows ?? data.rows.length} row(s)
           </p>
         )}
       </div>

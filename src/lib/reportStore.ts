@@ -13,6 +13,7 @@ export interface StoredReportResponse {
   from: string;
   to: string;
   snapshotCount: number;
+  totalRows?: number;
   rows: Record<string, unknown>[];
   pivot: Record<string, Record<string, number>>;
   columns: string[];
@@ -346,29 +347,38 @@ export async function getStoredReportData(
 
   if (reportType === "eco_driving") {
     const rows = await db
-      .select()
+      .select({
+        reportDate: motrexEcoDriving.reportDate,
+        registrationNumber: motrexEcoDriving.registrationNumber,
+        violation: motrexEcoDriving.violation,
+        count: motrexEcoDriving.count,
+      })
       .from(motrexEcoDriving)
       .where(and(gte(motrexEcoDriving.reportDate, fromDate), lte(motrexEcoDriving.reportDate, toDate)))
       .orderBy(motrexEcoDriving.reportDate);
     if (rows.length) {
       const pivot: Record<string, Record<string, number>> = {};
       const columns = new Set<string>();
+      const dailyCounts = new Map<string, number>();
       for (const r of rows) {
+        const reportDate = String(r.reportDate);
         if (!pivot[r.registrationNumber]) pivot[r.registrationNumber] = {};
         pivot[r.registrationNumber][r.violation] = (pivot[r.registrationNumber][r.violation] ?? 0) + r.count;
         columns.add(r.violation);
+        dailyCounts.set(reportDate, (dailyCounts.get(reportDate) ?? 0) + 1);
       }
       return {
         reportType,
         from: fromDate,
         to: toDate,
-        snapshotCount: new Set(rows.map((r) => String(r.reportDate))).size,
-        rows: rows.map((r) => ({ ...(r.rawRow as Record<string, unknown>), _reportDate: String(r.reportDate) })),
+        snapshotCount: dailyCounts.size,
+        totalRows: rows.length,
+        rows: [],
         pivot,
         columns: Array.from(columns).sort(),
-        snapshots: Array.from(new Set(rows.map((r) => String(r.reportDate)))).map((d) => ({
+        snapshots: Array.from(dailyCounts.entries()).map(([d, rowCount]) => ({
           reportDate: d,
-          rowCount: rows.filter((r) => String(r.reportDate) === d).length,
+          rowCount,
           meta: { source: "motrex_eco_driving" },
         })),
       };
