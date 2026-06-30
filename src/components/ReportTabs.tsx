@@ -344,7 +344,7 @@ function ReportTabShell({
         />
         {error && <p style={{ color: "var(--red)", marginBottom: 12 }}>{error}</p>}
         {loading ? (
-          <p style={{ color: "var(--text2)" }}>Loading from cloud database…</p>
+          <p style={{ color: "var(--text2)" }}>Preparing report data…</p>
         ) : mode === "pivot" ? (
           <PivotTable pivot={data?.pivot ?? {}} columns={data?.columns ?? []} />
         ) : (
@@ -480,7 +480,7 @@ export function YardsTab() {
 
         {error && <p style={{ color: "var(--red)", marginBottom: 12 }}>{error}</p>}
         {loading ? (
-          <p style={{ color: "var(--text2)" }}>Loading from cloud database…</p>
+          <p style={{ color: "var(--text2)" }}>Preparing report data…</p>
         ) : !sorted.length ? (
           <p style={{ color: "var(--text2)", padding: 16 }}>
             No vehicles currently inside a yard geofence for this range.
@@ -628,7 +628,7 @@ export function TripsTab() {
         />
         {error && <p style={{ color: "var(--red)", marginBottom: 12 }}>{error}</p>}
         {loading ? (
-          <p style={{ color: "var(--text2)" }}>Loading from cloud database…</p>
+          <p style={{ color: "var(--text2)" }}>Preparing report data…</p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
             <p style={{ margin: 0, color: "var(--text2)", fontSize: ".82rem", fontWeight: 600 }}>
@@ -769,7 +769,7 @@ export function TripsSummaryTab() {
         />
         {error && <p style={{ color: "var(--red)", marginBottom: 12 }}>{error}</p>}
         {loading ? (
-          <p style={{ color: "var(--text2)" }}>Loading from cloud database…</p>
+          <p style={{ color: "var(--text2)" }}>Preparing report data…</p>
         ) : (
           <SimpleTable rows={summaryRows} columnOrder={summaryColumns} />
         )}

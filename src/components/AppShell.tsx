@@ -285,97 +285,87 @@ export default function AppShell({ onLogout, initialLiveData = null }: AppShellP
   };
 
   const renderReports = () => {
-    if (reportsView === "trips") {
-      return (
-        <div>
+    return (
+      <div>
+        <div style={{ display: reportsView === "home" ? "block" : "none" }}>
+          <div style={{ marginBottom: 18 }}>
+          <h1 style={{ margin: 0, fontSize: "1.45rem", color: "var(--text)" }}>Reports</h1>
+          <p style={{ margin: "8px 0 0", color: "var(--text2)", fontSize: ".86rem", maxWidth: 760 }}>
+            Pick a report below to open its dedicated view. You can choose a time window, filter by vehicles, and review data from Neon.
+          </p>
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+              gap: 16,
+            }}
+          >
+            {reportCards.map((card) => {
+              const Icon = card.icon;
+              return (
+                <button
+                  key={card.id}
+                  type="button"
+                  onClick={() => setReportsView(card.id)}
+                  style={{
+                    minHeight: 156,
+                    border: "1px solid rgba(148,163,184,0.35)",
+                    borderRadius: 14,
+                    padding: 18,
+                    background: card.background,
+                    boxShadow: "0 16px 34px rgba(15,23,42,0.08)",
+                    textAlign: "left",
+                    cursor: "pointer",
+                    display: "flex",
+                    flexDirection: "column",
+                    justifyContent: "space-between",
+                    color: "var(--text)",
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 42,
+                      height: 42,
+                      borderRadius: 12,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      background: "rgba(255,255,255,0.58)",
+                      color: card.color,
+                    }}
+                  >
+                  <Icon size={21} />
+                  </span>
+                  <span>
+                    <strong style={{ display: "block", fontSize: "1rem", marginBottom: 6 }}>{card.title}</strong>
+                    <span style={{ display: "block", color: "var(--text2)", fontSize: ".8rem", lineHeight: 1.4 }}>
+                      {card.description}
+                    </span>
+                  </span>
+                  <span style={{ color: "#b91c1c", fontSize: ".8rem", fontWeight: 800 }}>Open report {"->"}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div style={{ display: reportsView === "trips" ? "block" : "none" }}>
           <button type="button" onClick={() => setReportsView("home")} style={backButtonStyle}>
             Back to Reports
           </button>
           <TripsTab />
         </div>
-      );
-    }
-    if (reportsView === "summary") {
-      return (
-        <div>
+        <div style={{ display: reportsView === "summary" ? "block" : "none" }}>
           <button type="button" onClick={() => setReportsView("home")} style={backButtonStyle}>
             Back to Reports
           </button>
           <TripsSummaryTab />
         </div>
-      );
-    }
-    if (reportsView === "map") {
-      return (
-        <div>
+        <div style={{ display: reportsView === "map" ? "block" : "none" }}>
           <button type="button" onClick={() => setReportsView("home")} style={backButtonStyle}>
             Back to Reports
           </button>
           <MapTab data={data} loading={loading} error={error} onRefresh={refresh} />
-        </div>
-      );
-    }
-    return (
-      <div>
-        <div style={{ marginBottom: 18 }}>
-          <h1 style={{ margin: 0, fontSize: "1.45rem", color: "var(--text)" }}>Reports</h1>
-          <p style={{ margin: "8px 0 0", color: "var(--text2)", fontSize: ".86rem", maxWidth: 760 }}>
-            Pick a report below to open its dedicated view. You can choose a time window, filter by vehicles, and review data from Neon.
-          </p>
-        </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-            gap: 16,
-          }}
-        >
-          {reportCards.map((card) => {
-            const Icon = card.icon;
-            return (
-              <button
-                key={card.id}
-                type="button"
-                onClick={() => setReportsView(card.id)}
-                style={{
-                  minHeight: 156,
-                  border: "1px solid rgba(148,163,184,0.35)",
-                  borderRadius: 14,
-                  padding: 18,
-                  background: card.background,
-                  boxShadow: "0 16px 34px rgba(15,23,42,0.08)",
-                  textAlign: "left",
-                  cursor: "pointer",
-                  display: "flex",
-                  flexDirection: "column",
-                  justifyContent: "space-between",
-                  color: "var(--text)",
-                }}
-              >
-                <span
-                  style={{
-                    width: 42,
-                    height: 42,
-                    borderRadius: 12,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    background: "rgba(255,255,255,0.58)",
-                    color: card.color,
-                  }}
-                >
-                  <Icon size={21} />
-                </span>
-                <span>
-                  <strong style={{ display: "block", fontSize: "1rem", marginBottom: 6 }}>{card.title}</strong>
-                  <span style={{ display: "block", color: "var(--text2)", fontSize: ".8rem", lineHeight: 1.4 }}>
-                    {card.description}
-                  </span>
-                </span>
-                <span style={{ color: "#b91c1c", fontSize: ".8rem", fontWeight: 800 }}>Open report {"->"}</span>
-              </button>
-            );
-          })}
         </div>
       </div>
     );

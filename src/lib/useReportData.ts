@@ -20,6 +20,9 @@ export interface ReportApiResponse {
   snapshots: Array<{ reportDate: string; rowCount: number; meta: Record<string, unknown> | null }>;
 }
 
+const reportCache = new Map<string, ReportApiResponse>();
+const reportRequests = new Map<string, Promise<ReportApiResponse>>();
+
 function defaultRangeForType(reportType: StoredReportType): { from: string; to: string } {
   switch (reportType) {
     case "yards":
@@ -41,8 +44,9 @@ export function useReportData(reportType: StoredReportType) {
   const [toDate, setToDate] = useState(defaults.to);
   const [appliedFrom, setAppliedFrom] = useState(fromDate);
   const [appliedTo, setAppliedTo] = useState(toDate);
-  const [data, setData] = useState<ReportApiResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const initialCacheKey = `${reportType}:${defaults.from}:${defaults.to}`;
+  const [data, setData] = useState<ReportApiResponse | null>(() => reportCache.get(initialCacheKey) ?? null);
+  const [loading, setLoading] = useState(() => !reportCache.has(initialCacheKey));
   const [error, setError] = useState<string | null>(null);
 
   const run = useCallback(() => {
@@ -55,22 +59,44 @@ export function useReportData(reportType: StoredReportType) {
   useEffect(() => {
     let cancelled = false;
 
+    const cacheKey = `${reportType}:${appliedFrom}:${appliedTo}`;
+    const cached = reportCache.get(cacheKey);
+    if (cached) {
+      Promise.resolve().then(() => {
+        if (!cancelled) {
+          setData(cached);
+          setLoading(false);
+          setError(null);
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
     const query = new URLSearchParams({ from: appliedFrom, to: appliedTo });
-    fetch(`/api/reports/${reportType}?${query.toString()}`, { cache: "no-store" })
+    const request =
+      reportRequests.get(cacheKey) ??
+      fetch(`/api/reports/${reportType}?${query.toString()}`, { cache: "no-store" })
       .then(async (res) => {
         if (!res.ok) {
           const payload = (await res.json().catch(() => ({}))) as { error?: string };
           throw new Error(payload.error ?? `Request failed (${res.status})`);
         }
         return res.json() as Promise<ReportApiResponse>;
-      })
+      });
+    reportRequests.set(cacheKey, request);
+
+    request
       .then((payload) => {
+        reportCache.set(cacheKey, payload);
         if (!cancelled) setData(payload);
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load report.");
       })
       .finally(() => {
+        reportRequests.delete(cacheKey);
         if (!cancelled) setLoading(false);
       });
 
