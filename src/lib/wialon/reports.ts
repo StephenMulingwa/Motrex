@@ -86,6 +86,14 @@ function splitTripsBatches<T>(items: T[]): T[][] {
   return batches.filter((batch) => batch.length > 0);
 }
 
+function splitBatches<T>(items: T[], size: number): T[][] {
+  const batches: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    batches.push(items.slice(i, i + size));
+  }
+  return batches.filter((batch) => batch.length > 0);
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -269,6 +277,81 @@ async function executeTripsForBounds({
   };
 }
 
+async function executeEcoDrivingForBounds({
+  sid,
+  from,
+  to,
+  dateStr,
+  extraMeta,
+}: {
+  sid: string;
+  from: number;
+  to: number;
+  dateStr: string;
+  extraMeta: Record<string, unknown>;
+}): Promise<{ payload: ReportSnapshotPayload; rowCount: number; tableIndex: number }> {
+  try {
+    const { tables } = await execReport(sid, {
+      resourceId: ECO_RESOURCE_ID,
+      objectId: MOTREX_GROUP_ID,
+      from,
+      to,
+      inlineTemplate: ECO_INLINE_TEMPLATE as unknown as Record<string, unknown>,
+    });
+    const ecoIdx = tables.findIndex((t) =>
+      t.header.some((h) => /violation|mileage/i.test(h)),
+    );
+    const idx = ecoIdx >= 0 ? ecoIdx : 1;
+    const data = await fetchAllTableData(sid, tables, idx);
+    extraMeta.executionMode = "group";
+    return { payload: buildEcoPivot(data.rows), rowCount: data.rows.length, tableIndex: idx };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/Track3 Database error (4|1003)|LIMIT exec_report_duration|timeout/i.test(message)) throw error;
+    console.warn(`${dateStr} / eco_driving full group failed (${message}); falling back to 50-vehicle batches.`);
+  }
+
+  const unitIds = await fetchUnitGroupUnitIds(sid, MOTREX_GROUP_ID);
+  const batches = splitBatches(unitIds, 50);
+  const rows: Record<string, string>[] = [];
+  const batchMeta: Array<{ batch: number; unitCount: number; rowCount: number; tableIndex: number }> = [];
+  let tableIndex = 0;
+
+  console.log(`  Eco unit batches: ${batches.map((batch) => batch.length).join(" + ")} vehicles`);
+  for (const [idx, batch] of batches.entries()) {
+    console.log(`  Running eco batch ${idx + 1}/${batches.length} (${batch.length} vehicles) …`);
+    const { tables } = await withWialonRetry(`${dateStr} / eco_driving batch ${idx + 1}`, () =>
+      execReport(sid, {
+        resourceId: ECO_RESOURCE_ID,
+        objectId: batch[0],
+        reportObjectIdList: batch.slice(1),
+        from,
+        to,
+        inlineTemplate: ECO_INLINE_TEMPLATE as unknown as Record<string, unknown>,
+      }),
+    );
+    const ecoIdx = tables.findIndex((t) =>
+      t.header.some((h) => /violation|mileage/i.test(h)),
+    );
+    const currentTableIndex = ecoIdx >= 0 ? ecoIdx : 0;
+    const data = await fetchAllTableData(sid, tables, currentTableIndex);
+    rows.push(...data.rows);
+    tableIndex = currentTableIndex;
+    batchMeta.push({
+      batch: idx + 1,
+      unitCount: batch.length,
+      rowCount: data.rows.length,
+      tableIndex: currentTableIndex,
+    });
+  }
+
+  extraMeta.executionMode = "unit_batches";
+  extraMeta.batchCount = batches.length;
+  extraMeta.unitCount = unitIds.length;
+  extraMeta.batches = batchMeta;
+  return { payload: buildEcoPivot(rows), rowCount: rows.length, tableIndex };
+}
+
 export async function executeStoredReport(
   reportType: StoredReportType,
   dateStr: string,
@@ -320,21 +403,10 @@ export async function executeStoredReport(
       rowCount = data.rows.length;
       tableIndex = idx;
     } else if (reportType === "eco_driving") {
-      const { tables } = await execReport(sid, {
-        resourceId: ECO_RESOURCE_ID,
-        objectId: MOTREX_GROUP_ID,
-        from,
-        to,
-        inlineTemplate: ECO_INLINE_TEMPLATE as unknown as Record<string, unknown>,
-      });
-      const ecoIdx = tables.findIndex((t) =>
-        t.header.some((h) => /violation|mileage/i.test(h)),
-      );
-      const idx = ecoIdx >= 0 ? ecoIdx : 1;
-      const data = await fetchAllTableData(sid, tables, idx);
-      payload = buildEcoPivot(data.rows);
-      rowCount = data.rows.length;
-      tableIndex = idx;
+      const result = await executeEcoDrivingForBounds({ sid, from, to, dateStr, extraMeta });
+      payload = result.payload;
+      rowCount = result.rowCount;
+      tableIndex = result.tableIndex;
     }
 
     return {
