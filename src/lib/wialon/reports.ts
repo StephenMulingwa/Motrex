@@ -290,27 +290,6 @@ async function executeEcoDrivingForBounds({
   dateStr: string;
   extraMeta: Record<string, unknown>;
 }): Promise<{ payload: ReportSnapshotPayload; rowCount: number; tableIndex: number }> {
-  try {
-    const { tables } = await execReport(sid, {
-      resourceId: ECO_RESOURCE_ID,
-      objectId: MOTREX_GROUP_ID,
-      from,
-      to,
-      inlineTemplate: ECO_INLINE_TEMPLATE as unknown as Record<string, unknown>,
-    });
-    const ecoIdx = tables.findIndex((t) =>
-      t.header.some((h) => /violation|mileage/i.test(h)),
-    );
-    const idx = ecoIdx >= 0 ? ecoIdx : 1;
-    const data = await fetchAllTableData(sid, tables, idx);
-    extraMeta.executionMode = "group";
-    return { payload: buildEcoPivot(data.rows), rowCount: data.rows.length, tableIndex: idx };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/Track3 Database error (4|1003)|LIMIT exec_report_duration|timeout/i.test(message)) throw error;
-    console.warn(`${dateStr} / eco_driving full group failed (${message}); falling back to 50-vehicle batches.`);
-  }
-
   const unitIds = await fetchUnitGroupUnitIds(sid, MOTREX_GROUP_ID);
   const batches = splitBatches(unitIds, 50);
   const rows: Record<string, string>[] = [];
