@@ -33,6 +33,7 @@ backfill-log.txt
 util-eco-backfill-progress.log
 eco-backfill-progress.log
 eco-finish-backfill-progress.log
+eco-fullgroup-finish-progress.log
 tmp_shift_check.json
 
 # env files (can opt-in for committing if needed)
