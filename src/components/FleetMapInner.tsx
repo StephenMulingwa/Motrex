@@ -66,7 +66,7 @@ export default function FleetMapInner({ units }: FleetMapInnerProps) {
     const lon = units.reduce((sum, u) => sum + u.lon, 0) / units.length;
     return [lat, lon] as [number, number];
   }, [units]);
-  const showPermanentLabels = units.length > 0 && units.length <= 120;
+  const showPermanentLabels = units.length > 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
