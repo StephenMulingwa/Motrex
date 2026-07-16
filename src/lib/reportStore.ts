@@ -104,39 +104,13 @@ async function upsertDedicatedReport(result: ReportExecutionResult): Promise<voi
   if (result.reportType === "trips") {
     const weekStart = String(result.rawMeta.weekStart ?? result.rawMeta.intervalStart ?? result.reportDate);
     const weekEnd = String(result.rawMeta.weekEnd ?? result.rawMeta.intervalEnd ?? result.reportDate);
+    // Per-unit sync already upserts vehicle-by-vehicle; do not wipe the interval.
+    if (result.rawMeta.mode === "per_unit") return;
     await db
       .delete(motrexTrips)
       .where(and(eq(motrexTrips.weekStart, weekStart), eq(motrexTrips.weekEnd, weekEnd)));
     if (!rows.length) return;
-    await db.insert(motrexTrips).values(
-      rows.map((row) => ({
-        weekStart,
-        weekEnd,
-        tripType: String(row.Table ?? "Raw"),
-        routePair: tripMetric(row, "Route Pair"),
-        registrationNumber: normalizeRegistration(row),
-        vehicle: normalizeVehicle(row),
-        grouping: tripMetric(row, "Grouping"),
-        trip: tripMetric(row, "Trip"),
-        tripFrom: tripMetric(row, "Trip from") || tripMetric(row, "From") || tripMetric(row, "Loading Zone"),
-        tripTo: tripMetric(row, "Trip to") || tripMetric(row, "To") || tripMetric(row, "Offloading Zone"),
-        beginning: tripMetric(row, "Beginning") || tripMetric(row, "Departure Time"),
-        end: tripMetric(row, "End") || tripMetric(row, "Arrival Time"),
-        mileage: tripMetric(row, "Mileage"),
-        consumedByAbsFcs: tripMetric(row, "Consumed by AbsFCS"),
-        avgConsumptionByAbsFcs: tripMetric(row, "Avg consumption by AbsFCS"),
-        tripDuration: tripMetric(row, "Trip duration") || tripMetric(row, "Transit Time"),
-        totalTime: tripMetric(row, "Total time"),
-        parkingsDuration: tripMetric(row, "Parkings duration"),
-        avgSpeed: tripMetric(row, "Avg speed"),
-        maxSpeed: tripMetric(row, "Max speed"),
-        initialFuelLevel: tripMetric(row, "Initial fuel level"),
-        finalFuelLevel: tripMetric(row, "Final fuel level"),
-        count: tripMetric(row, "Count") || tripMetric(row, "Trip Count"),
-        rawRow: row,
-        updatedAt: now,
-      })),
-    );
+    await db.insert(motrexTrips).values(tripRowInsertValues(weekStart, weekEnd, rows, now));
     return;
   }
 
@@ -242,6 +216,260 @@ export async function clearAllTrips(): Promise<void> {
   const db = getDb();
   await db.execute(sql`DELETE FROM motrex_trips`);
   await db.execute(sql`DELETE FROM report_snapshots WHERE report_type = 'trips'`);
+}
+
+function tripRowInsertValues(
+  weekStart: string,
+  weekEnd: string,
+  rows: Record<string, unknown>[],
+  now = new Date(),
+) {
+  return rows.map((row) => ({
+    weekStart,
+    weekEnd,
+    tripType: String(row.Table ?? "Raw"),
+    routePair: tripMetric(row, "Route Pair"),
+    registrationNumber: normalizeRegistration(row),
+    vehicle: normalizeVehicle(row),
+    grouping: tripMetric(row, "Grouping"),
+    trip: tripMetric(row, "Trip"),
+    tripFrom: tripMetric(row, "Trip from") || tripMetric(row, "From") || tripMetric(row, "Loading Zone"),
+    tripTo: tripMetric(row, "Trip to") || tripMetric(row, "To") || tripMetric(row, "Offloading Zone"),
+    beginning: tripMetric(row, "Beginning") || tripMetric(row, "Departure Time"),
+    end: tripMetric(row, "End") || tripMetric(row, "Arrival Time"),
+    mileage: tripMetric(row, "Mileage"),
+    consumedByAbsFcs: tripMetric(row, "Consumed by AbsFCS"),
+    avgConsumptionByAbsFcs: tripMetric(row, "Avg consumption by AbsFCS"),
+    tripDuration: tripMetric(row, "Trip duration") || tripMetric(row, "Transit Time"),
+    totalTime: tripMetric(row, "Total time"),
+    parkingsDuration: tripMetric(row, "Parkings duration"),
+    avgSpeed: tripMetric(row, "Avg speed"),
+    maxSpeed: tripMetric(row, "Max speed"),
+    initialFuelLevel: tripMetric(row, "Initial fuel level"),
+    finalFuelLevel: tripMetric(row, "Final fuel level"),
+    count: tripMetric(row, "Count") || tripMetric(row, "Trip Count"),
+    rawRow: row,
+    updatedAt: now,
+  }));
+}
+
+/**
+ * Resume-safe upsert: replace only the given vehicles' rows for the interval.
+ * Empty rows are a no-op (unit had no trips).
+ */
+export async function upsertTripsVehicleRows(
+  weekStart: string,
+  weekEnd: string,
+  rows: Record<string, unknown>[],
+): Promise<number> {
+  if (!rows.length) return 0;
+  await ensureSchema();
+  const db = getDb();
+  const now = new Date();
+  const registrations = [
+    ...new Set(rows.map((row) => registrationKey(normalizeRegistration(row))).filter(Boolean)),
+  ];
+  for (const reg of registrations) {
+    await db.execute(sql`
+      DELETE FROM motrex_trips
+      WHERE week_start = ${weekStart}::date
+        AND week_end = ${weekEnd}::date
+        AND regexp_replace(upper(registration_number), '[^A-Z0-9]', '', 'g') = ${reg}
+    `);
+  }
+  for (const batch of chunks(tripRowInsertValues(weekStart, weekEnd, rows, now), 2000)) {
+    await db.insert(motrexTrips).values(batch);
+  }
+  return rows.length;
+}
+
+export type GroupTripsSyncMeta = {
+  syncProgress: "in_progress" | "complete";
+  lastUnitIndex: number;
+  unitCount: number;
+  unitIds?: number[];
+  templateId?: number;
+  mode?: string;
+  lastSyncAt?: string;
+  lastUnitRowCount?: number;
+  lastTables?: unknown;
+  intervalStart?: string;
+  intervalEnd?: string;
+  [key: string]: unknown;
+};
+
+/** Snapshot key for a group-trips interval (prefer interval start). */
+export function groupTripsSnapshotDate(intervalStart: string): string {
+  return intervalStart;
+}
+
+export async function getGroupTripsSyncMeta(
+  intervalStart: string,
+  intervalEnd: string,
+): Promise<GroupTripsSyncMeta | null> {
+  await ensureSchema();
+  const db = getDb();
+  const [snap] = await db
+    .select()
+    .from(reportSnapshots)
+    .where(
+      and(
+        eq(reportSnapshots.reportType, "trips"),
+        eq(reportSnapshots.reportDate, groupTripsSnapshotDate(intervalStart)),
+      ),
+    )
+    .limit(1);
+  if (!snap?.rawMeta) return null;
+  const meta = snap.rawMeta as GroupTripsSyncMeta;
+  if (meta.intervalEnd && String(meta.intervalEnd) !== intervalEnd) {
+    // Different bounds under same start key — still return for resume of this start.
+  }
+  return meta;
+}
+
+export async function saveGroupTripsSyncMeta(
+  intervalStart: string,
+  intervalEnd: string,
+  meta: GroupTripsSyncMeta,
+): Promise<void> {
+  await ensureSchema();
+  const db = getDb();
+  const reportDate = groupTripsSnapshotDate(intervalStart);
+  const rawMeta: GroupTripsSyncMeta = {
+    ...meta,
+    intervalStart,
+    intervalEnd,
+    weekStart: intervalStart,
+    weekEnd: intervalEnd,
+    mode: meta.mode ?? "per_unit",
+  };
+  await db
+    .insert(reportSnapshots)
+    .values({
+      reportType: "trips",
+      reportDate,
+      payload: { rows: [] },
+      rawMeta,
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: [reportSnapshots.reportType, reportSnapshots.reportDate],
+      set: {
+        rawMeta,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+export interface GroupTripsUnitSyncResult {
+  unitIndex: number;
+  unitCount: number;
+  unitId: number;
+  rawRowCount: number;
+  storedRowCount: number;
+  isLast: boolean;
+  intervalStart: string;
+  intervalEnd: string;
+  syncProgress: "in_progress" | "complete";
+  tables: Array<{ name: string; rowCount: number; index: number }>;
+}
+
+/** Sync one Motrex unit for Group Trips (template 62) over [intervalStart, intervalEnd]. */
+export async function syncGroupTripsUnitToDb(
+  unitIndex: number,
+  options: {
+    intervalStart: string;
+    intervalEnd: string;
+    clearBeforeSync?: boolean;
+    unitIds?: number[];
+  },
+): Promise<GroupTripsUnitSyncResult> {
+  await ensureSchema();
+  const { intervalStart, intervalEnd, clearBeforeSync = false } = options;
+  const { dayBoundsUnix } = await import("./dateRange");
+  const { buildMotrexTripTables } = await import("./motrexTrips");
+  const {
+    runGroupTripsForUnit,
+    withWialonRetry,
+  } = await import("./wialon/reports");
+  const { fetchUnitGroupUnitIds, wialonLogin, wialonLogout } = await import("./wialon/client");
+  const { MOTREX_GROUP_ID, TEMPLATES } = await import("./motrexConfig");
+
+  if (clearBeforeSync && unitIndex === 0) {
+    await dbDeleteTripsForInterval(intervalStart, intervalEnd);
+  }
+
+  let unitIds = options.unitIds;
+  if (!unitIds?.length) {
+    const existing = await getGroupTripsSyncMeta(intervalStart, intervalEnd);
+    if (Array.isArray(existing?.unitIds) && existing.unitIds.length) {
+      unitIds = existing.unitIds.map(Number);
+    } else {
+      const sid = await wialonLogin();
+      try {
+        unitIds = await fetchUnitGroupUnitIds(sid, MOTREX_GROUP_ID);
+      } finally {
+        await wialonLogout(sid).catch(() => undefined);
+      }
+    }
+  }
+
+  if (unitIndex < 0 || unitIndex >= unitIds.length) {
+    throw new Error(`unitIndex ${unitIndex} out of range (0…${unitIds.length - 1})`);
+  }
+
+  const unitId = unitIds[unitIndex];
+  const { from } = dayBoundsUnix(intervalStart);
+  const { to } = dayBoundsUnix(intervalEnd);
+  const label = `${intervalStart} → ${intervalEnd} / unit ${unitIndex + 1}/${unitIds.length} (${unitId})`;
+
+  const result = await withWialonRetry(
+    label,
+    async () => {
+      const sid = await wialonLogin();
+      try {
+        return await runGroupTripsForUnit(sid, unitId, from, to);
+      } finally {
+        await wialonLogout(sid).catch(() => undefined);
+      }
+    },
+    [45_000, 90_000, 150_000],
+  );
+
+  const tripRows = buildMotrexTripTables(result.rows, intervalEnd);
+  await upsertTripsVehicleRows(intervalStart, intervalEnd, tripRows);
+  const isLast = unitIndex >= unitIds.length - 1;
+  await saveGroupTripsSyncMeta(intervalStart, intervalEnd, {
+    syncProgress: isLast ? "complete" : "in_progress",
+    lastUnitIndex: unitIndex,
+    unitCount: unitIds.length,
+    unitIds,
+    templateId: TEMPLATES.groupTrips,
+    mode: "per_unit",
+    lastSyncAt: new Date().toISOString(),
+    lastUnitRowCount: result.rows.length,
+    lastTables: result.tables,
+  });
+
+  return {
+    unitIndex,
+    unitCount: unitIds.length,
+    unitId,
+    rawRowCount: result.rows.length,
+    storedRowCount: tripRows.length,
+    isLast,
+    intervalStart,
+    intervalEnd,
+    syncProgress: isLast ? "complete" : "in_progress",
+    tables: result.tables,
+  };
+}
+
+async function dbDeleteTripsForInterval(weekStart: string, weekEnd: string): Promise<void> {
+  const db = getDb();
+  await db
+    .delete(motrexTrips)
+    .where(and(eq(motrexTrips.weekStart, weekStart), eq(motrexTrips.weekEnd, weekEnd)));
 }
 
 /** @deprecated Prefer clearYardsForDate / clearYardsBeforeDate so UI can serve last-good rows. */

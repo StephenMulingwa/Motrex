@@ -2,7 +2,6 @@ import type { ReportSnapshotPayload } from "@/lib/data";
 import {
   ECO_INLINE_TEMPLATE,
   ECO_RESOURCE_ID,
-  GROUP_TRIPS_FALLBACK_BATCH_SIZE,
   MOTREX_GROUP_ID,
   MOTREX_RESOURCE_ID,
   TEMPLATES,
@@ -12,8 +11,8 @@ import {
   UTILIZATION_RESOURCE_ID,
   type StoredReportType,
 } from "@/lib/motrexConfig";
-import { dayBoundsUnix, enumerateDates, todayEatDateString } from "@/lib/dateRange";
-import { buildMotrexTripTables, matchGroupTripTable } from "@/lib/motrexTrips";
+import { dayBoundsUnix, todayEatDateString } from "@/lib/dateRange";
+import { matchGroupTripTable } from "@/lib/motrexTrips";
 import { registrationKey } from "@/lib/vehicleLabels";
 import {
   execReport,
@@ -121,6 +120,50 @@ export async function runTemplateAllTablesForBounds(
     }));
   }
 
+  return mergeGroupTripTables(sid, tables);
+}
+
+/**
+ * Match ControlTech UI: run template 62 with reportObjectId = one unit over the full interval.
+ * Fetches detalization from all six geofence-trip tables.
+ */
+export async function runGroupTripsForUnit(
+  sid: string,
+  unitId: number,
+  from: number,
+  to: number,
+): Promise<{ rows: Record<string, string>[]; tables: Array<{ name: string; rowCount: number; index: number }> }> {
+  let tables: ReportTableMeta[];
+  try {
+    ({ tables } = await execReport(sid, {
+      resourceId: MOTREX_RESOURCE_ID,
+      templateId: TEMPLATES.groupTrips,
+      objectId: unitId,
+      from,
+      to,
+      remoteExec: true,
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/Track3 Database error (4|6|7)/.test(message)) throw error;
+    const template = await getReportTemplateData(sid, MOTREX_RESOURCE_ID, TEMPLATES.groupTrips);
+    ({ tables } = await execReport(sid, {
+      resourceId: MOTREX_RESOURCE_ID,
+      objectId: unitId,
+      from,
+      to,
+      inlineTemplate: template,
+      remoteExec: true,
+    }));
+  }
+
+  return mergeGroupTripTables(sid, tables);
+}
+
+async function mergeGroupTripTables(
+  sid: string,
+  tables: ReportTableMeta[],
+): Promise<{ rows: Record<string, string>[]; tables: Array<{ name: string; rowCount: number; index: number }> }> {
   const merged: Record<string, string>[] = [];
   const tableMeta: Array<{ name: string; rowCount: number; index: number }> = [];
 
@@ -128,7 +171,6 @@ export async function runTemplateAllTablesForBounds(
     if (tables[i].rows <= 0) continue;
     const data = await fetchAllTableData(sid, tables, i);
     const tableName = tables[i].name || `table_${i}`;
-    // Prefer known group-trip tables; still keep unnamed detalization if columns look like trips.
     const isKnown = Boolean(matchGroupTripTable(tableName));
     const looksLikeTrip = data.headers.some((h) => /trip\s*from|trip\s*to|beginning/i.test(h));
     if (!isKnown && !looksLikeTrip) continue;
@@ -140,54 +182,6 @@ export async function runTemplateAllTablesForBounds(
   }
 
   return { rows: merged, tables: tableMeta };
-}
-
-function shouldTripsSplitFallback(error: unknown): boolean {
-  const msg = error instanceof Error ? error.message : String(error);
-  return /Track3 Database error (1|4|7|1003|1004|1005|6)|LIMIT exec_report_duration|LIMIT msgs_activity|timeout|temporar|ECONNRESET|ETIMEDOUT|fetch failed|Invalid session|remote report/i.test(
-    msg,
-  );
-}
-
-async function fetchGroupTripsBatchWithFallback(
-  from: number,
-  to: number,
-  unitIds: number[] | undefined,
-  label: string,
-): Promise<{ rows: Record<string, string>[]; tables: Array<{ name: string; rowCount: number; index: number }> }> {
-  type BatchResult = { rows: Record<string, string>[]; tables: Array<{ name: string; rowCount: number; index: number }> };
-  const minSplit = GROUP_TRIPS_FALLBACK_BATCH_SIZE;
-
-  async function runFresh(ids: number[] | undefined, attemptLabel: string): Promise<BatchResult> {
-    const sid = await wialonLogin();
-    try {
-      return await withWialonRetry(
-        attemptLabel,
-        // Always remoteExec for group-rides template — sync often hits error 4 on Track3.
-        () => runTemplateAllTablesForBounds(sid, TEMPLATES.groupTrips, from, to, ids, true),
-        [60_000, 120_000, 180_000],
-      );
-    } finally {
-      await wialonLogout(sid).catch(() => undefined);
-    }
-  }
-
-  async function run(ids: number[] | undefined, attemptLabel: string): Promise<BatchResult> {
-    try {
-      return await runFresh(ids, attemptLabel);
-    } catch (error) {
-      if (!ids || ids.length <= minSplit || !shouldTripsSplitFallback(error)) throw error;
-      const mid = Math.ceil(ids.length / 2);
-      console.warn(`${attemptLabel} failed — fallback split: ${mid} + ${ids.length - mid}`);
-      await new Promise((r) => setTimeout(r, 15_000));
-      const a = await run(ids.slice(0, mid), `${attemptLabel} (${mid})`);
-      await new Promise((r) => setTimeout(r, 10_000));
-      const b = await run(ids.slice(mid), `${attemptLabel} (${ids.length - mid})`);
-      return { rows: [...a.rows, ...b.rows], tables: [...a.tables, ...b.tables] };
-    }
-  }
-
-  return run(unitIds, label);
 }
 
 function splitUtilizationFallbackBatches(unitIds: number[]): [number[], number[]] {
@@ -433,6 +427,8 @@ async function executeTripsForBounds({
   intervalStart,
   intervalEnd,
   started,
+  startUnitIndex = 0,
+  unitIdsOverride,
 }: {
   from: number;
   to: number;
@@ -440,77 +436,73 @@ async function executeTripsForBounds({
   intervalStart: string;
   intervalEnd: string;
   started: number;
+  startUnitIndex?: number;
+  unitIdsOverride?: number[];
 }): Promise<ReportExecutionResult> {
-  const sid = await wialonLogin();
-  let unitIds: number[];
-  try {
-    unitIds = await fetchUnitGroupUnitIds(sid, MOTREX_GROUP_ID);
-  } finally {
-    await wialonLogout(sid).catch(() => undefined);
+  const { getGroupTripsSyncMeta, syncGroupTripsUnitToDb } = await import("@/lib/reportStore");
+
+  let unitIds = unitIdsOverride;
+  if (!unitIds?.length) {
+    const existing = await getGroupTripsSyncMeta(intervalStart, intervalEnd);
+    if (Array.isArray(existing?.unitIds) && existing.unitIds.length) {
+      unitIds = existing.unitIds.map(Number);
+    } else {
+      const sid0 = await wialonLogin();
+      try {
+        unitIds = await fetchUnitGroupUnitIds(sid0, MOTREX_GROUP_ID);
+      } finally {
+        await wialonLogout(sid0).catch(() => undefined);
+      }
+    }
   }
 
-  const rawTripRows: Record<string, string>[] = [];
+  console.log(
+    `  Group Trips (template ${TEMPLATES.groupTrips}): per-unit ${startUnitIndex + 1}…${unitIds.length} for ${intervalStart} → ${intervalEnd}`,
+  );
+
   const batchMeta: Array<{
     batch: number;
+    unitId: number;
     unitCount: number;
     rowCount: number;
+    storedRowCount: number;
     tables: Array<{ name: string; rowCount: number; index: number }>;
   }> = [];
+  let totalStored = 0;
+  let totalRaw = 0;
 
-  const dates = enumerateDates(intervalStart, intervalEnd);
-  const useDaily = dates.length > 1;
-
-  if (useDaily) {
-    console.log(
-      `  Group Trips (template ${TEMPLATES.groupTrips}): ${dates.length} day-by-day full-group runs (${unitIds.length} vehicles)…`,
-    );
-    for (const [idx, dateStr] of dates.entries()) {
-      console.log(`  Running group trips day ${idx + 1}/${dates.length} (${dateStr}) …`);
-      const dayBounds = dayBoundsUnix(dateStr);
-      const result = await fetchGroupTripsBatchWithFallback(
-        dayBounds.from,
-        dayBounds.to,
-        undefined,
-        `${dateStr} / group trips day`,
-      );
-      rawTripRows.push(...result.rows);
-      batchMeta.push({
-        batch: idx + 1,
-        unitCount: unitIds.length,
-        rowCount: result.rows.length,
-        tables: result.tables,
-      });
-      await new Promise((r) => setTimeout(r, 5_000));
-    }
-  } else {
-    console.log(
-      `  Group Trips (template ${TEMPLATES.groupTrips}): full Motrex group (${unitIds.length} vehicles) for ${intervalStart}…`,
-    );
-    const full = await fetchGroupTripsBatchWithFallback(
-      from,
-      to,
-      undefined,
-      `${intervalStart} → ${intervalEnd} / group trips full group`,
-    );
-    rawTripRows.push(...full.rows);
-    batchMeta.push({
-      batch: 1,
-      unitCount: unitIds.length,
-      rowCount: full.rows.length,
-      tables: full.tables,
+  for (let idx = startUnitIndex; idx < unitIds.length; idx += 1) {
+    const result = await syncGroupTripsUnitToDb(idx, {
+      intervalStart,
+      intervalEnd,
+      unitIds,
+      clearBeforeSync: false,
     });
+    totalRaw += result.rawRowCount;
+    totalStored += result.storedRowCount;
+    batchMeta.push({
+      batch: idx + 1,
+      unitId: result.unitId,
+      unitCount: 1,
+      rowCount: result.rawRowCount,
+      storedRowCount: result.storedRowCount,
+      tables: result.tables,
+    });
+    console.log(
+      `  unit ${idx + 1}/${unitIds.length}: raw=${result.rawRowCount} stored=${result.storedRowCount} tables=${result.tables.map((t) => `${t.name}(${t.rowCount})`).join("|") || "none"}`,
+    );
+    await sleep(2_000);
   }
 
-  const tripRows = buildMotrexTripTables(rawTripRows, reportDate);
   return {
     reportType: "trips",
-    reportDate,
-    payload: { rows: tripRows },
+    reportDate: intervalStart,
+    payload: { rows: [] },
     rawMeta: {
       templateId: TEMPLATES.groupTrips,
       templateName: "SM_Motrex - Group Trips",
-      rowCount: tripRows.length,
-      rawRowCount: rawTripRows.length,
+      rowCount: totalStored,
+      rawRowCount: totalRaw,
       executionMs: Date.now() - started,
       from,
       to,
@@ -520,6 +512,9 @@ async function executeTripsForBounds({
       weekEnd: intervalEnd,
       batchCount: batchMeta.length,
       unitCount: unitIds.length,
+      startUnitIndex,
+      mode: "per_unit",
+      syncProgress: "complete",
       batches: batchMeta,
     },
   };
@@ -648,22 +643,25 @@ export async function executeHistoricalTripsReport(): Promise<ReportExecutionRes
   });
 }
 
-/** Execute SM_Motrex - Group Trips (template 62) for an arbitrary date range (week). */
+/** Execute SM_Motrex - Group Trips (template 62) for an arbitrary date range (per-unit). */
 export async function executeGroupTripsWeek(
   weekStart: string,
   weekEnd: string,
+  options?: { startUnitIndex?: number; unitIds?: number[] },
 ): Promise<ReportExecutionResult> {
   const started = Date.now();
   const { from } = dayBoundsUnix(weekStart);
   const { to } = dayBoundsUnix(weekEnd);
-  console.log(`  Group trips week: ${weekStart} 00:00 → ${weekEnd} 23:59`);
+  console.log(`  Group trips interval: ${weekStart} 00:00 → ${weekEnd} 23:59 (per-unit)`);
   return executeTripsForBounds({
     from,
     to,
-    reportDate: weekEnd,
+    reportDate: weekStart,
     intervalStart: weekStart,
     intervalEnd: weekEnd,
     started,
+    startUnitIndex: options?.startUnitIndex ?? 0,
+    unitIdsOverride: options?.unitIds,
   });
 }
 

@@ -134,8 +134,8 @@ export const ECO_INLINE_TEMPLATE = {
 export const BACKFILL_START = "2026-06-01";
 export const YARDS_BACKFILL_START = "2026-06-22";
 export const TRIPS_BACKFILL_START = "2026-06-22";
-export const TRIPS_HISTORICAL_START = "2026-06-15";
-export const TRIPS_HISTORICAL_END = "2026-06-30";
+export const TRIPS_HISTORICAL_START = "2026-06-01";
+export const TRIPS_HISTORICAL_END = "2026-07-15";
 
 /** Date ranges for initial backfill per report type. */
 export function getBackfillDatesForType(reportType: StoredReportType): string[] {

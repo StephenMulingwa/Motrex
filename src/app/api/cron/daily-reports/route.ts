@@ -6,6 +6,7 @@ import {
   ensureSchema,
   upsertReportSnapshot,
 } from "@/lib/reportStore";
+import { triggerNextTripsUnitSync } from "@/lib/tripsSyncChain";
 import { executeStoredReport, withWialonRetry } from "@/lib/wialon/reports";
 
 export const maxDuration = 300;
@@ -30,19 +31,32 @@ export async function GET(request: Request) {
 
   try {
     await ensureSchema();
-    const types = ["yards", "trips"] as const;
-    const results = [];
-    for (const reportType of types) {
-      const result = await withWialonRetry(`${dateStr} / ${reportType}`, () =>
-        executeStoredReport(reportType, dateStr),
-      );
-      await upsertReportSnapshot(result);
-      results.push({
-        reportType: result.reportType,
-        rowCount: result.payload.rows?.length ?? Object.keys(result.payload.pivot ?? {}).length,
-        meta: result.rawMeta,
-      });
-    }
+    const results: unknown[] = [];
+
+    const yards = await withWialonRetry(`${dateStr} / yards`, () =>
+      executeStoredReport("yards", dateStr),
+    );
+    await upsertReportSnapshot(yards);
+    results.push({
+      reportType: yards.reportType,
+      rowCount: yards.payload.rows?.length ?? 0,
+      meta: yards.rawMeta,
+    });
+
+    // Group Trips: per-unit chain for yesterday (template 62) — too many units for one invocation.
+    triggerNextTripsUnitSync({
+      unitIndex: 0,
+      intervalStart: dateStr,
+      intervalEnd: dateStr,
+    });
+    results.push({
+      reportType: "trips",
+      mode: "per_unit_chain",
+      intervalStart: dateStr,
+      intervalEnd: dateStr,
+      chained: true,
+    });
+
     details.results = results;
   } catch (error) {
     ok = false;
