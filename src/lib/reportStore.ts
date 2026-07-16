@@ -41,6 +41,7 @@ export interface StoredReportResponse {
   columns: string[];
   snapshots: Array<{ reportDate: string; rowCount: number; meta: Record<string, unknown> | null }>;
   syncProgress?: "in_progress" | "complete";
+  syncInProgress?: boolean;
 }
 
 function pickKey(row: Record<string, unknown>, patterns: RegExp[]): string | null {
@@ -225,10 +226,14 @@ async function clearYardsForDate(reportDate: string): Promise<void> {
   await db.delete(motrexYards).where(eq(motrexYards.reportDate, reportDate));
 }
 
-/** Remove rows older than reportDate (keeps last-good day visible until today's sync finishes). */
+/** Remove rows older than the day before reportDate (always keep yesterday as last-good). */
 async function clearYardsBeforeDate(reportDate: string): Promise<void> {
   const db = getDb();
-  await db.delete(motrexYards).where(sql`${motrexYards.reportDate} < ${reportDate}`);
+  // Keep reportDate and the previous calendar day so a same-day re-sync wipe still has fallback data.
+  await db.execute(sql`
+    DELETE FROM motrex_yards
+    WHERE report_date < (${reportDate}::date - INTERVAL '1 day')
+  `);
 }
 
 /** Remove all Vipingo/Tororo / Group Trips rows and trip snapshots. */
@@ -495,7 +500,9 @@ export async function syncYardsInsideToDb(
   let insideUnits: YardsInsideUnit[] = [];
 
   if (insideIndex === 0) {
-    // Clear only today — prior days stay available for instant UI load during sync.
+    // Clear only today — keep yesterday (and snapshot last-good) visible during the long sync.
+    const previousSnap = await loadTodayYardsSnapshot();
+    const previousInside = previousSnap?.payload.insideRows ?? [];
     if (options.clearBeforeSync) {
       await clearYardsForDate(reportDate);
     }
@@ -516,18 +523,10 @@ export async function syncYardsInsideToDb(
         lastSyncAt: now.toISOString(),
       });
     }
-  } else {
-    const snap = await loadTodayYardsSnapshot();
-    insideUnits = loadInsideUnitsFromMeta(snap?.rawMeta);
-    if (!insideUnits.length) {
-      throw new Error("insideUnits missing from snapshot; restart sync at insideIndex=0.");
-    }
-  }
 
-  if (insideIndex === 0 && insideUnits.length > 0) {
     await upsertYardsSnapshotOnly(
       reportDate,
-      { rows: [] },
+      { rows: [], insideRows: previousInside },
       {
         source: "yards_template_58",
         templateId: 58,
@@ -540,7 +539,15 @@ export async function syncYardsInsideToDb(
         rowCount: 0,
       },
     );
+  } else {
+    const snap = await loadTodayYardsSnapshot();
+    insideUnits = loadInsideUnitsFromMeta(snap?.rawMeta);
+    if (!insideUnits.length) {
+      throw new Error("insideUnits missing from snapshot; restart sync at insideIndex=0.");
+    }
   }
+
+  // (index 0 snapshot already written above when starting a fresh sync)
 
   if (insideIndex >= insideUnits.length) {
     return finalizeYardsSync(reportDate, {
@@ -597,7 +604,17 @@ export async function syncYardsInsideToDb(
     return finalizeYardsSync(reportDate, partialMeta);
   }
 
-  await upsertYardsSnapshotOnly(reportDate, { rows: [] }, partialMeta);
+  const prevSnap = await loadTodayYardsSnapshot();
+  const dbRowsNow = await getDb().select().from(motrexYards).where(eq(motrexYards.reportDate, reportDate));
+  const liveInside = yardsInsideFromDbOrVisits(dbRowsNow, mapYardsDbRows(dbRowsNow), now.getTime(), lastExecutionTime);
+  await upsertYardsSnapshotOnly(
+    reportDate,
+    {
+      rows: mapYardsDbRows(dbRowsNow) as ReportSnapshotPayload["rows"],
+      insideRows: liveInside.length ? liveInside : prevSnap?.payload.insideRows,
+    },
+    partialMeta,
+  );
 
   return {
     vehicleIndex: insideIndex,
@@ -874,10 +891,11 @@ export async function getYardsLiveStoredData(): Promise<StoredReportResponse & {
       ? formatEatDateTime(rowLastExec)
       : "—";
   const endMs = Date.now();
+  const snapshotInside = snapshot?.payload.insideRows ?? [];
   const insideRows = rows.some((r) => r.status === "Inside")
     ? mapYardsDbToInsideRows(rows, endMs)
-    : !servedFromPriorDay && syncProgress === "complete" && snapshot?.payload.insideRows?.length
-      ? snapshot.payload.insideRows
+    : snapshotInside.length
+      ? snapshotInside
       : [];
 
   return {
@@ -885,7 +903,7 @@ export async function getYardsLiveStoredData(): Promise<StoredReportResponse & {
     from: range.from,
     to: range.to,
     snapshotCount: new Set(rows.map((r) => String(r.reportDate))).size,
-    rows: mappedRows,
+    rows: mappedRows.length ? mappedRows : (snapshot?.payload.rows as Record<string, unknown>[] | undefined) ?? [],
     insideRows,
     pivot: {},
     columns: [],
@@ -895,6 +913,7 @@ export async function getYardsLiveStoredData(): Promise<StoredReportResponse & {
       meta: { source: "motrex_yards_live", syncProgress: syncProgress ?? null, servedFromPriorDay },
     })),
     syncProgress,
+    syncInProgress: syncProgress === "in_progress",
     lastExecutionTime,
   };
 }
