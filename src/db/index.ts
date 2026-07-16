@@ -3,9 +3,9 @@ import { drizzle, type NeonHttpDatabase } from "drizzle-orm/neon-http";
 import * as schema from "./schema";
 
 function connectionString(): string {
-  const url = (process.env.MotrexDB ?? process.env.motrexneondb ?? "").trim();
+  const url = (process.env.MotrexTransferDB ?? process.env.MotrexDB ?? "").trim();
   if (!url) {
-    throw new Error("MotrexDB connection string is not set");
+    throw new Error("MotrexTransferDB connection string is not set");
   }
   return url.replace(/^["']|["']$/g, "");
 }

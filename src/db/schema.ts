@@ -27,7 +27,7 @@ export const reportSnapshots = pgTable(
   (t) => ({
     reportTypeCheck: check(
       "report_snapshots_type_check",
-      sql`${t.reportType} IN ('yards', 'trips', 'utilization', 'eco_driving')`,
+      sql`${t.reportType} IN ('yards', 'trips', 'trips_summary', 'utilization', 'eco_driving')`,
     ),
     reportTypeDateUnique: uniqueIndex("report_snapshots_type_date_unique").on(
       t.reportType,
@@ -59,13 +59,16 @@ export const motrexYards = pgTable("motrex_yards", {
   rawRow: jsonb("raw_row").notNull().$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => ({
+  reportDateRegUnique: uniqueIndex("motrex_yards_date_reg_unique").on(t.reportDate, t.registrationNumber),
+}));
 
 export const motrexTrips = pgTable("motrex_trips", {
   id: serial("id").primaryKey(),
   weekStart: date("week_start").notNull(),
   weekEnd: date("week_end").notNull(),
   tripType: text("trip_type").notNull().default("Raw"),
+  routePair: text("route_pair"),
   registrationNumber: text("registration_number").notNull(),
   vehicle: text("vehicle").notNull(),
   grouping: text("grouping"),
@@ -89,6 +92,30 @@ export const motrexTrips = pgTable("motrex_trips", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const motrexTripsSummary = pgTable(
+  "motrex_trips_summary",
+  {
+    id: serial("id").primaryKey(),
+    weekStart: date("week_start").notNull(),
+    weekEnd: date("week_end").notNull(),
+    registrationNumber: text("registration_number").notNull(),
+    vehicle: text("vehicle").notNull(),
+    mileageKm: doublePrecision("mileage_km").notNull().default(0),
+    fuelConsumedL: doublePrecision("fuel_consumed_l").notNull().default(0),
+    avgConsumptionKml: doublePrecision("avg_consumption_kml").notNull().default(0),
+    rawRow: jsonb("raw_row").notNull().$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    weekRegUnique: uniqueIndex("motrex_trips_summary_week_reg_unique").on(
+      t.weekStart,
+      t.weekEnd,
+      t.registrationNumber,
+    ),
+  }),
+);
 
 export const motrexUtilization = pgTable("motrex_utilization", {
   id: serial("id").primaryKey(),

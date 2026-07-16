@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import Image from "next/image";
-import Link from "next/link";
 
 interface LoginProps {
   onLogin: () => Promise<void>;
@@ -756,26 +755,6 @@ export default function Login({ onLogin }: LoginProps) {
               </span>
             </span>
           </a>
-
-          <p
-            style={{
-              textAlign: "center",
-              fontSize: ".74rem",
-              color: "var(--text2)",
-              marginTop: "10px",
-              fontWeight: 600,
-            }}
-          >
-            <Link
-              href="/install"
-              style={{
-                color: "var(--blue)",
-                textDecoration: "none",
-              }}
-            >
-              Install app on your phone
-            </Link>
-          </p>
 
           <p
             style={{

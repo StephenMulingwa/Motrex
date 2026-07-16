@@ -1,20 +1,26 @@
+export type LiveMonitorStatus = "moving" | "stationary" | "unknown";
+export type LiveMonitorDirection = "going" | "coming" | "inside";
+
 export interface LiveMonitorRow {
   vehicle: string;
   currentLocation: string;
   lat: number | null;
   lon: number | null;
   lastUpdate: string;
+  lastUpdateMs: number | null;
+  geofence: string | null;
+  direction: LiveMonitorDirection;
   speedKmh: number;
   status: string;
+  statusCategory: LiveMonitorStatus;
   updatedInWindow: boolean;
 }
 
 export interface LiveMonitorKpis {
   tracked: number;
-  notUpdatedInWindow: number;
-  active: number;
+  moving: number;
   stationary: number;
-  avgSpeed: number;
+  unknown: number;
 }
 
 export interface LiveMonitorDataset {

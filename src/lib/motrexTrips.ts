@@ -1,22 +1,64 @@
-import { parseDateTimeMs } from "./sortableTable";
+import { parseDateTimeMs } from "./parseDateTime";
 import { registrationLabel } from "./vehicleLabels";
 
-type Endpoint = "tororo" | "athi";
+export type TripDirection = "Outbound" | "Inbound";
 
-interface TripEvent {
-  vehicle: string;
-  endpoint: Endpoint;
-  geofence: string;
-  timeIn: string;
-  timeOut: string;
-  timestamp: number;
+export interface GroupTripTableMeta {
+  match: RegExp;
+  direction: TripDirection;
+  routePair: "motrex_tororo" | "multiple_tororo" | "vipingo_tororo_athi";
+  label: string;
 }
 
+/** Six Wialon tables in SM_Motrex - Group Trips (template 62). */
+export const GROUP_TRIP_TABLES: GroupTripTableMeta[] = [
+  {
+    match: /motrex\s*-\s*tororo/i,
+    direction: "Outbound",
+    routePair: "motrex_tororo",
+    label: "Motrex - Tororo",
+  },
+  {
+    match: /tororo\s*-\s*motrex/i,
+    direction: "Inbound",
+    routePair: "motrex_tororo",
+    label: "Tororo - Motrex",
+  },
+  {
+    match: /multiple\s*-\s*tororo/i,
+    direction: "Outbound",
+    routePair: "multiple_tororo",
+    label: "Multiple - Tororo",
+  },
+  {
+    match: /tororo\s*-\s*multiple/i,
+    direction: "Inbound",
+    routePair: "multiple_tororo",
+    label: "Tororo - Multiple",
+  },
+  {
+    match: /vipingo\s*-\s*tororo\s*\/?\s*athi/i,
+    direction: "Outbound",
+    routePair: "vipingo_tororo_athi",
+    label: "Vipingo - Tororo/Athi",
+  },
+  {
+    match: /tororo\s*\/?\s*athi\s*-\s*vipingo/i,
+    direction: "Inbound",
+    routePair: "vipingo_tororo_athi",
+    label: "Tororo/Athi - Vipingo",
+  },
+];
+
 interface LegRow extends Record<string, string | number> {
-  Table: "Outbound" | "Inbound";
+  Table: TripDirection;
   Vehicle: string;
   From: string;
   To: string;
+  "Loading Zone": string;
+  "Offloading Zone": string;
+  "Route Pair": string;
+  "Wialon Table": string;
   "Departure Time": string;
   "Arrival Time": string;
   "Transit Time": string;
@@ -27,12 +69,13 @@ interface LegRow extends Record<string, string | number> {
 interface TatRow extends Record<string, string | number> {
   Table: "TAT";
   Vehicle: string;
-  "Tororo Departure": string;
-  "Athi River Arrival": string;
-  "Athi River Departure": string;
-  "Tororo Return": string;
+  "Loading Departure": string;
+  "Offloading Arrival": string;
+  "Offloading Departure": string;
+  "Loading Return": string;
   "Outbound Transit": string;
-  "Time at Athi River": string;
+  "Time at Offload": string;
+  "Customer Time": string;
   "Inbound Transit": string;
   "Full Round-Trip TAT": string;
   "Trip Count": number;
@@ -49,17 +92,6 @@ function pickKey(row: Record<string, unknown>, patterns: RegExp[]): string | nul
 
 function value(row: Record<string, unknown>, key: string | null): string {
   return key ? String(row[key] ?? "").trim() : "";
-}
-
-function endpointForGeofence(geofence: string): Endpoint | null {
-  const g = geofence.toLowerCase();
-  if (/tororo/.test(g)) return "tororo";
-  if (/athi|arthi|mombasa|vipingo/.test(g)) return "athi";
-  return null;
-}
-
-function endpointLabel(endpoint: Endpoint): string {
-  return endpoint === "tororo" ? "Tororo" : "Athi River";
 }
 
 function formatDuration(ms: number): string {
@@ -104,39 +136,38 @@ function preserveWialonTripColumns(row: Record<string, unknown>): Record<string,
   return Object.fromEntries(WIALON_TRIP_COLUMNS.map((column) => [column, String(row[column] ?? "")]));
 }
 
-function normalizeTripEvents(rows: Record<string, unknown>[]): TripEvent[] {
-  return rows
-    .map((row) => {
-      const vehicleKey = pickKey(row, [/^vehicle$|vehicle|unit|registration|plate|name/i]);
-      const geofenceKey = pickKey(row, [/geofence|geozone|location|place/i]);
-      const timeInKey = pickKey(row, [/time\s*in|beginning|entry|arrival|from/i]);
-      const timeOutKey = pickKey(row, [/time\s*out|end|exit|departure|to/i]);
-      const geofence = value(row, geofenceKey);
-      const endpoint = endpointForGeofence(geofence);
-      const timeIn = value(row, timeInKey);
-      const timeOut = value(row, timeOutKey);
-      const timestamp = parseDateTimeMs(timeIn || timeOut);
-      return {
-        vehicle: registrationLabel(value(row, vehicleKey)),
-        endpoint,
-        geofence,
-        timeIn,
-        timeOut,
-        timestamp,
-      };
-    })
-    .filter((row): row is TripEvent => Boolean(row.vehicle && row.endpoint && row.timestamp > 0));
+export function matchGroupTripTable(tableName: string): GroupTripTableMeta | null {
+  const name = String(tableName ?? "").trim();
+  if (!name) return null;
+  return GROUP_TRIP_TABLES.find((t) => t.match.test(name)) ?? null;
 }
 
-export function buildMotrexTripTables(rows: Record<string, unknown>[], reportDate: string): Record<string, string | number>[] {
-  const events = normalizeTripEvents(rows);
-  const byVehicle = new Map<string, TripEvent[]>();
-  for (const event of events) {
-    const list = byVehicle.get(event.vehicle) ?? [];
-    list.push(event);
-    byVehicle.set(event.vehicle, list);
-  }
+function zoneLabel(raw: string): string {
+  const g = raw.toLowerCase();
+  if (/tororo/.test(g)) return "Tororo";
+  if (/athi|arthi/.test(g)) return "Athi River";
+  if (/kibarani|multiple/.test(g)) return "Multiple Kibarani";
+  if (/vipingo\s*main|main\s*yard/.test(g)) return "Vipingo Main yard";
+  if (/vipingo|mombasa\s*cement/.test(g)) return "Mombasa Cement(Vipingo Area)";
+  return raw.trim() || "Unknown";
+}
 
+export function isOffloadingZone(zone: string): boolean {
+  return /tororo|athi|arthi/i.test(zone);
+}
+
+export function isLoadingZone(zone: string): boolean {
+  return /vipingo|mombasa|kibarani|multiple|motrex/i.test(zone) && !isOffloadingZone(zone);
+}
+
+/**
+ * Build Outbound / Inbound / TAT rows from template-62 detalization rows.
+ * Prefer rows tagged with `_wialonTable` (multi-table fetch). Falls back to Trip from/to heuristics.
+ */
+export function buildMotrexTripTables(
+  rows: Record<string, unknown>[],
+  reportDate: string,
+): Record<string, string | number>[] {
   const outbound: LegRow[] = [];
   const inbound: LegRow[] = [];
 
@@ -146,22 +177,54 @@ export function buildMotrexTripTables(rows: Record<string, unknown>[], reportDat
     const toKey = pickKey(row, [/^trip\s*to$|trip\s*to/i]);
     const beginningKey = pickKey(row, [/^beginning$|beginning|departure/i]);
     const endKey = pickKey(row, [/^end$|arrival/i]);
-    if (!fromKey || !toKey || !beginningKey || !endKey) continue;
 
-    const from = endpointForGeofence(value(row, fromKey));
-    const to = endpointForGeofence(value(row, toKey));
-    const vehicle = registrationLabel(value(row, vehicleKey));
-    if (!vehicle || !from || !to || from === to) continue;
+    const vehicle = registrationLabel(value(row, vehicleKey) || value(row, pickKey(row, [/grouping/i])));
+    if (!vehicle) continue;
 
+    const tripFrom = value(row, fromKey);
+    const tripTo = value(row, toKey);
     const departure = value(row, beginningKey);
     const arrival = value(row, endKey);
-    const table = from === "athi" && to === "tororo" ? "Outbound" : "Inbound";
+    if (!tripFrom || !tripTo || !departure || !arrival) continue;
+
+    const tableName = String(row._wialonTable ?? row["Wialon Table"] ?? "");
+    const meta = matchGroupTripTable(tableName);
+
+    let direction: TripDirection;
+    let routePair: string;
+    let wialonTable: string;
+
+    if (meta) {
+      direction = meta.direction;
+      routePair = meta.routePair;
+      wialonTable = meta.label;
+    } else {
+      // Fallback: Vipingo/Motrex/Multiple → Tororo/Athi = Outbound
+      const fromOffload = isOffloadingZone(tripFrom);
+      const toOffload = isOffloadingZone(tripTo);
+      if (fromOffload === toOffload) continue;
+      direction = !fromOffload && toOffload ? "Outbound" : "Inbound";
+      routePair = /kibarani|multiple/i.test(tripFrom + tripTo)
+        ? "multiple_tororo"
+        : /vipingo\s*main|main\s*yard/i.test(tripFrom + tripTo)
+          ? "vipingo_tororo_athi"
+          : "motrex_tororo";
+      wialonTable = tableName || "inferred";
+    }
+
+    const loadingZone = direction === "Outbound" ? zoneLabel(tripFrom) : zoneLabel(tripTo);
+    const offloadingZone = direction === "Outbound" ? zoneLabel(tripTo) : zoneLabel(tripFrom);
+
     const leg: LegRow = {
       ...preserveWialonTripColumns(row),
-      Table: table,
+      Table: direction,
       Vehicle: vehicle,
-      From: endpointLabel(from),
-      To: endpointLabel(to),
+      From: zoneLabel(tripFrom),
+      To: zoneLabel(tripTo),
+      "Loading Zone": loadingZone,
+      "Offloading Zone": offloadingZone,
+      "Route Pair": routePair,
+      "Wialon Table": wialonTable,
       "Departure Time": departure,
       "Arrival Time": arrival,
       "Transit Time": String(row["Trip duration"] ?? "") || diffLabel(arrival, departure),
@@ -170,56 +233,21 @@ export function buildMotrexTripTables(rows: Record<string, unknown>[], reportDat
       "Trip Count": Number(row.Count ?? 1) || 1,
       "Report Date": reportDate,
     };
-    if (table === "Outbound") outbound.push(leg);
+
+    if (direction === "Outbound") outbound.push(leg);
     else inbound.push(leg);
   }
 
-  for (const [vehicle, vehicleEvents] of byVehicle) {
-    const sorted = vehicleEvents.sort((a, b) => a.timestamp - b.timestamp);
-    let previous: TripEvent | null = null;
-
-    for (const event of sorted) {
-      if (!previous) {
-        previous = event;
-        continue;
-      }
-      if (event.endpoint === previous.endpoint) {
-        previous = event;
-        continue;
-      }
-
-      const from = previous.endpoint;
-      const to = event.endpoint;
-      const departure = previous.timeOut || previous.timeIn;
-      const arrival = event.timeIn || event.timeOut;
-      const table = from === "athi" && to === "tororo" ? "Outbound" : "Inbound";
-      const leg: LegRow = {
-        Table: table,
-        Vehicle: vehicle,
-        From: endpointLabel(from),
-        To: endpointLabel(to),
-        "Departure Time": departure,
-        "Arrival Time": arrival,
-        "Transit Time": diffLabel(arrival, departure),
-        "Trip Count": 1,
-        "Report Date": reportDate,
-      };
-      if (table === "Outbound") outbound.push(leg);
-      else inbound.push(leg);
-      previous = event;
-    }
-  }
-
   const tat: TatRow[] = [];
-  const inboundByVehicle = new Map<string, LegRow[]>();
+  const inboundByKey = new Map<string, LegRow[]>();
   for (const leg of inbound) {
-    const list = inboundByVehicle.get(leg.Vehicle) ?? [];
-    list.push(leg);
-    inboundByVehicle.set(leg.Vehicle, list);
+    const key = `${leg.Vehicle}::${leg["Route Pair"]}`;
+    inboundByKey.set(key, [...(inboundByKey.get(key) ?? []), leg]);
   }
 
   for (const leg of outbound) {
-    const candidates = (inboundByVehicle.get(leg.Vehicle) ?? []).filter(
+    const key = `${leg.Vehicle}::${leg["Route Pair"]}`;
+    const candidates = (inboundByKey.get(key) ?? []).filter(
       (candidate) => parseDateTimeMs(candidate["Departure Time"]) >= parseDateTimeMs(leg["Arrival Time"]),
     );
     const returnLeg = candidates.sort(
@@ -230,12 +258,13 @@ export function buildMotrexTripTables(rows: Record<string, unknown>[], reportDat
     tat.push({
       Table: "TAT",
       Vehicle: leg.Vehicle,
-      "Tororo Departure": leg["Departure Time"],
-      "Athi River Arrival": leg["Arrival Time"],
-      "Athi River Departure": returnLeg["Departure Time"],
-      "Tororo Return": returnLeg["Arrival Time"],
+      "Loading Departure": leg["Departure Time"],
+      "Offloading Arrival": leg["Arrival Time"],
+      "Offloading Departure": returnLeg["Departure Time"],
+      "Loading Return": returnLeg["Arrival Time"],
       "Outbound Transit": leg["Transit Time"],
-      "Time at Athi River": diffLabel(returnLeg["Departure Time"], leg["Arrival Time"]),
+      "Time at Offload": diffLabel(returnLeg["Departure Time"], leg["Arrival Time"]),
+      "Customer Time": diffLabel(returnLeg["Departure Time"], leg["Arrival Time"]),
       "Inbound Transit": returnLeg["Transit Time"],
       "Full Round-Trip TAT": diffLabel(returnLeg["Arrival Time"], leg["Departure Time"]),
       "Trip Count": 1,

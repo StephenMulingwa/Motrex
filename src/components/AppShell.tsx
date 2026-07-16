@@ -17,6 +17,7 @@ import { YardsTab, TripsTab, TripsSummaryTab, UtilizationTab, EcoDrivingTab } fr
 import MapTab from "./MapTab";
 import type { LiveMonitorDataset } from "@/lib/data";
 import { useLiveMonitor } from "@/lib/useLiveMonitor";
+import { useYardsData } from "@/lib/useYardsData";
 import { useMediaQuery } from "@/lib/useMediaQuery";
 import { LAYOUT_NARROW_QUERY } from "@/lib/breakpoints";
 
@@ -42,12 +43,22 @@ export default function AppShell({ onLogout, initialLiveData = null }: AppShellP
   const [sidebarHover, setSidebarHover] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const headerRef = useRef<HTMLElement | null>(null);
-  const { data, loading, error, refresh } = useLiveMonitor(initialLiveData);
+  const { data, loading, error, refresh, startDate, endDate, setStartDate, setEndDate, nowMs } = useLiveMonitor(initialLiveData);
+  const {
+    data: yardsData,
+    loading: yardsLoading,
+    error: yardsError,
+    reloadFromDb: yardsReloadFromDb,
+    syncFromTrack3: yardsSyncFromTrack3,
+    syncing: yardsSyncing,
+    nowMs: yardsNowMs,
+    lastExecutionTime: yardsLastExecutionTime,
+  } = useYardsData();
   const isMobileNav = useMediaQuery(LAYOUT_NARROW_QUERY);
 
   useEffect(() => {
     if (activeTab !== "live") return;
-    const iv = setInterval(refresh, 5 * 60 * 1000);
+    const iv = setInterval(refresh, 10 * 60 * 1000);
     return () => clearInterval(iv);
   }, [activeTab, refresh]);
 
@@ -249,8 +260,8 @@ export default function AppShell({ onLogout, initialLiveData = null }: AppShellP
   const reportCards = [
     {
       id: "trips" as const,
-      title: "Athi River / Tororo Trips",
-      description: "Outbound and inbound trip details by vehicle",
+      title: "Group Trips",
+      description: "Trips between Motrex, Multiple, and Vipingo yards and Tororo or Athi",
       icon: Route,
       background: "linear-gradient(135deg, rgba(219,234,254,0.95), rgba(239,246,255,0.92))",
       color: "#2563eb",
@@ -258,7 +269,7 @@ export default function AppShell({ onLogout, initialLiveData = null }: AppShellP
     {
       id: "summary" as const,
       title: "Summary",
-      description: "Trip summary statistics aggregated per vehicle",
+      description: "Weekly vehicle mileage, fuel, utilization, and engine-hour summary",
       icon: BarChart3,
       background: "linear-gradient(135deg, rgba(255,228,230,0.95), rgba(255,241,242,0.92))",
       color: "#be123c",
@@ -291,7 +302,7 @@ export default function AppShell({ onLogout, initialLiveData = null }: AppShellP
           <div style={{ marginBottom: 18 }}>
           <h1 style={{ margin: 0, fontSize: "1.45rem", color: "var(--text)" }}>Reports</h1>
           <p style={{ margin: "8px 0 0", color: "var(--text2)", fontSize: ".86rem", maxWidth: 760 }}>
-            Pick a report below to open its dedicated view. You can choose a time window, filter by vehicles, and review data from Neon.
+            Pick a report below to open its dedicated view. You can choose a time window, filter by vehicles, and review stored fleet data.
           </p>
           </div>
           <div
@@ -542,10 +553,29 @@ export default function AppShell({ onLogout, initialLiveData = null }: AppShellP
 
         <main style={{ flex: 1, minWidth: 0, ...mainPadStyle }}>
           <div style={panelStyle("live")}>
-            <LiveMonitor data={data} loading={loading} error={error} onRefresh={refresh} />
+            <LiveMonitor
+              data={data}
+              loading={loading}
+              error={error}
+              onRefresh={refresh}
+              startDate={startDate}
+              endDate={endDate}
+              onStartChange={setStartDate}
+              onEndChange={setEndDate}
+              nowMs={nowMs}
+            />
           </div>
           <div style={panelStyle("yards")}>
-            <YardsTab />
+            <YardsTab
+              data={yardsData}
+              loading={yardsLoading}
+              syncing={yardsSyncing}
+              error={yardsError}
+              onRefresh={yardsReloadFromDb}
+              onSyncFromTrack3={yardsSyncFromTrack3}
+              nowMs={yardsNowMs}
+              lastExecutionTime={yardsLastExecutionTime}
+            />
           </div>
           <div style={panelStyle("reports")}>
             {renderReports()}

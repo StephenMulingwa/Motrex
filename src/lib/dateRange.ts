@@ -90,6 +90,29 @@ export function fourteenDaysAgoEatDateString(): string {
   return formatEatDate(eat);
 }
 
+export function thirtyDaysAgoEatDateString(): string {
+  const eat = eatNowDate();
+  eat.setUTCDate(eat.getUTCDate() - 30);
+  return formatEatDate(eat);
+}
+
+/** Yards live report: rolling last 30 days in EAT through now. */
+export function getYardsLiveRange(): { from: string; to: string } {
+  return {
+    from: thirtyDaysAgoEatDateString(),
+    to: todayEatDateString(),
+  };
+}
+
+export function getYardsLiveUnixBounds(): { from: number; to: number } {
+  const range = getYardsLiveRange();
+  const fromBounds = dayBoundsUnix(range.from);
+  return {
+    from: fromBounds.from,
+    to: Math.floor(Date.now() / 1000),
+  };
+}
+
 export function getYardsDefaultRange(): { from: string; to: string } {
   return {
     from: "2026-06-22",
@@ -105,9 +128,25 @@ export function getTripsDefaultRange(): { from: string; to: string } {
 }
 
 export function getUtilizationDefaultRange(): { from: string; to: string } {
+  return getCurrentMonthEatRange();
+}
+
+/** First day of current month (EAT) through yesterday, or today on the 1st. */
+export function getCurrentMonthEatRange(): { from: string; to: string } {
   const eatNow = eatNowDate();
-  const start = `${eatNow.getUTCFullYear()}-06-01`;
-  return { from: start, to: yesterdayEatDateString() };
+  const year = eatNow.getUTCFullYear();
+  const month = String(eatNow.getUTCMonth() + 1).padStart(2, "0");
+  const from = `${year}-${month}-01`;
+  const yesterday = yesterdayEatDateString();
+  if (yesterday < from) {
+    return { from, to: todayEatDateString() };
+  }
+  return { from, to: yesterday };
+}
+
+export function currentEatMonthString(): string {
+  const eatNow = eatNowDate();
+  return `${eatNow.getUTCFullYear()}-${String(eatNow.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
 export function getEcoDefaultRange(): { from: string; to: string } {
@@ -126,6 +165,96 @@ export function dayBoundsUnix(dateStr: string): { from: number; to: number } {
   const from = new Date(`${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}T00:00:00+03:00`).getTime();
   const to = new Date(`${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}T23:59:59+03:00`).getTime();
   return { from: Math.floor(from / 1000), to: Math.floor(to / 1000) };
+}
+
+export function monthBounds(month: string): { from: string; to: string } {
+  const [year, monthIndex] = month.split("-").map(Number);
+  const lastDay = new Date(year, monthIndex, 0).getDate();
+  return { from: `${month}-01`, to: `${month}-${String(lastDay).padStart(2, "0")}` };
+}
+
+export function weekBounds(month: string, week: string): { from: string; to: string } {
+  if (week === "all") return monthBounds(month);
+  const weekNum = Number(week);
+  const start = (weekNum - 1) * 7 + 1;
+  const monthRange = monthBounds(month);
+  const end = Math.min(start + 6, Number(monthRange.to.slice(-2)));
+  return {
+    from: `${month}-${String(start).padStart(2, "0")}`,
+    to: `${month}-${String(end).padStart(2, "0")}`,
+  };
+}
+
+export function getTripsSummaryDefaultRange(): { from: string; to: string } {
+  return getCurrentMonthEatRange();
+}
+
+export function weekOverlapsRange(
+  weekStart: string,
+  weekEnd: string,
+  from: string,
+  to: string,
+): boolean {
+  return weekStart <= to && weekEnd >= from;
+}
+
+/** Calendar weeks (Week 1–5) within a date range, using the same month-week grid as the UI. */
+export function enumerateWeeksInRange(from: string, to: string): Array<{ from: string; to: string }> {
+  const startMonth = from.slice(0, 7);
+  const endMonth = to.slice(0, 7);
+  const months: string[] = [];
+  let [y, m] = startMonth.split("-").map(Number);
+  const [ey, em] = endMonth.split("-").map(Number);
+  while (y < ey || (y === ey && m <= em)) {
+    months.push(`${y}-${String(m).padStart(2, "0")}`);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+
+  const weeks: Array<{ from: string; to: string }> = [];
+  for (const month of months) {
+    for (let w = 1; w <= 5; w += 1) {
+      const bounds = weekBounds(month, String(w));
+      if (bounds.from > to || bounds.to < from) continue;
+      weeks.push({
+        from: bounds.from < from ? from : bounds.from,
+        to: bounds.to > to ? to : bounds.to,
+      });
+    }
+  }
+
+  const seen = new Set<string>();
+  return weeks.filter((w) => {
+    const key = `${w.from}:${w.to}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** Current UI calendar week (Week 1–5) clipped through yesterday (EAT). */
+export function currentWeekEatRangeThroughYesterday(): { from: string; to: string } {
+  const to = yesterdayEatDateString();
+  const month = to.slice(0, 7);
+  const day = Number(to.slice(8, 10));
+  const weekNum = Math.min(5, Math.max(1, Math.ceil(day / 7)));
+  const bounds = weekBounds(month, String(weekNum));
+  return {
+    from: bounds.from,
+    to: bounds.to > to ? to : bounds.to,
+  };
+}
+
+/** Previous calendar week (Mon–Sun style grid: last 7-day block ending yesterday). */
+export function previousWeekEatRange(): { from: string; to: string } {
+  const end = yesterdayEatDateString();
+  const eat = eatNowDate();
+  eat.setUTCDate(eat.getUTCDate() - 7);
+  const from = formatEatDate(eat);
+  return { from, to: end };
 }
 
 export function enumerateDates(from: string, to: string): string[] {

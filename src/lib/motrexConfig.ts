@@ -12,18 +12,29 @@ export const ECO_RESOURCE_ID = 17082202;
 export const TEMPLATES = {
   onlineStatus: 55,
   yards: 56,
-  athiTororoTrips: 15,
+  geofenceVisits: 58,
+  /** @deprecated Use groupTrips (template 62). */
+  athiTororoTrips: 62,
+  groupTrips: 62,
+  tripsSummary: 61,
 } as const;
 
-export const STORED_REPORT_TYPES = ["yards", "trips", "utilization", "eco_driving"] as const;
+export const STORED_REPORT_TYPES = ["yards", "trips", "trips_summary", "utilization", "eco_driving"] as const;
 export type StoredReportType = (typeof STORED_REPORT_TYPES)[number];
 
 export const REPORT_LABELS: Record<StoredReportType, string> = {
   yards: "SM_Motrex_Yards",
-  trips: "Motrex - Group Trips to Athi River/Tororo",
+  trips: "SM_Motrex - Group Trips",
+  trips_summary: "SM_New_Motrex_Summary",
   utilization: "Utilization",
   eco_driving: "Eco Driving",
 };
+
+export const TRIPS_SUMMARY_BATCH_SIZE = 25;
+export const TRIPS_SUMMARY_FALLBACK_BATCH_SIZE = 15;
+/** Smaller batches — template 62 has 6 geofence-ride tables and needs remoteExec. */
+export const GROUP_TRIPS_BATCH_SIZE = 25;
+export const GROUP_TRIPS_FALLBACK_BATCH_SIZE = 10;
 
 /** Inline Wialon template for daily utilization (from Track3 Large fleet.ipynb). */
 export const UTILIZATION_INLINE_TEMPLATE = {

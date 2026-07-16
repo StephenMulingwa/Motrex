@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -12,11 +12,23 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "backfill": "npx tsx scripts/backfill-direct.ts",
-    "backfill:api": "node scripts/run-backfill.mjs"
+    "backfill:api": "node scripts/run-backfill.mjs",
+    "yards:sync": "npx tsx scripts/sync-yards.ts",
+    "trips-summary:sync": "npx tsx scripts/sync-trips-summary.ts",
+    "trips:sync": "npx tsx scripts/sync-group-trips.ts",
+    "trips:clear": "npx tsx scripts/clear-trips.ts",
+    "eco:backfill": "npx tsx scripts/backfill-eco-range.ts",
+    "yards:dedupe": "npx tsx scripts/dedupe-yards.ts",
+    "yards:resume": "npx tsx scripts/resume-yards-sync.ts",
+    "yards:test": "npx tsx scripts/test-yards-vehicles.ts",
+    "yards:smart": "py scripts/smart-yards.py",
+    "yards:smart-kbk": "py scripts/smart-yards.py --test-kbk",
+    "login:gif": "npx tsx scripts/generate-login-gif.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
     "drizzle-orm": "^0.45.2",
+    "exceljs": "^4.4.0",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.7",
     "leaflet": "^1.9.4",

@@ -47,20 +47,22 @@ function num(v: number | string | undefined, fallback: number) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-/** Recharts XAxis tick: centered, multi-line category text. */
+/** Recharts XAxis tick: vertical category text to avoid label overlap. */
 export function CategoryAxisTick({ x = 0, y = 0, payload, maxChars = 14 }: CategoryAxisTickProps) {
-  const lines = splitCategoryLabel(String(payload?.value ?? ""), maxChars);
-  const lineHeight = 11;
+  const raw = String(payload?.value ?? "").trim();
+  const label = raw.length > maxChars ? `${raw.slice(0, Math.max(0, maxChars - 1))}…` : raw;
   const nx = num(x, 0);
   const ny = num(y, 0);
   return (
-    <g transform={`translate(${nx},${ny})`}>
-      <text textAnchor="middle" fill="#4d6488" fontSize={10} style={{ fontFamily: "var(--font-body), sans-serif" }}>
-        {lines.map((line, i) => (
-          <tspan key={i} x={0} dy={i === 0 ? 4 : lineHeight}>
-            {line}
-          </tspan>
-        ))}
+    <g transform={`translate(${nx},${ny + 8})`}>
+      <text
+        transform="rotate(-90)"
+        textAnchor="end"
+        fill="#4d6488"
+        fontSize={10}
+        style={{ fontFamily: "var(--font-body), sans-serif" }}
+      >
+        {label}
       </text>
     </g>
   );

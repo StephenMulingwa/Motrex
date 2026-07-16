@@ -4,6 +4,7 @@ import { useEffect, useMemo } from "react";
 import { CircleMarker, MapContainer, Popup, TileLayer, Tooltip, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import type { LiveMonitorStatus } from "@/lib/data";
 
 export type FleetMapUnit = {
   id: string;
@@ -12,6 +13,7 @@ export type FleetMapUnit = {
   lastSeen: string;
   speedKmh: number;
   status: string;
+  statusCategory: LiveMonitorStatus;
   lat: number;
   lon: number;
 };
@@ -23,7 +25,13 @@ type FleetMapInnerProps = {
 const DEFAULT_CENTER: [number, number] = [-1.286389, 36.817223];
 
 function markerColors(unit: FleetMapUnit) {
-  const moving = unit.speedKmh > 0;
+  if (unit.statusCategory === "unknown") {
+    return {
+      color: "#475569",
+      fillColor: "#94a3b8",
+    };
+  }
+  const moving = unit.statusCategory === "moving";
   return {
     color: moving ? "#067a46" : "#9f1239",
     fillColor: moving ? "#16a34a" : "#dc2626",
@@ -66,13 +74,11 @@ export default function FleetMapInner({ units }: FleetMapInnerProps) {
     const lon = units.reduce((sum, u) => sum + u.lon, 0) / units.length;
     return [lat, lon] as [number, number];
   }, [units]);
-  const showPermanentLabels = units.length > 0;
-
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
         <p style={{ margin: 0, fontSize: ".86rem", color: "var(--text2)", fontWeight: 500, maxWidth: 620 }}>
-          Live positions from SM_Motrex_Online Status. Tap or hover a dot for the registration and full details.
+          Live fleet positions. Tap or hover a dot for the registration and full details.
         </p>
         <span
           style={{
@@ -126,7 +132,7 @@ export default function FleetMapInner({ units }: FleetMapInnerProps) {
                   fillOpacity: 0.92,
                 }}
               >
-                <Tooltip permanent={showPermanentLabels} direction="right" offset={[10, 0]} className="fleet-map-label">
+                <Tooltip direction="right" offset={[10, 0]} className="fleet-map-label">
                   {unit.registrationNumber}
                 </Tooltip>
                 <Popup>

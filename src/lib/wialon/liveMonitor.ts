@@ -1,5 +1,7 @@
-import type { LiveMonitorDataset, LiveMonitorKpis, LiveMonitorRow } from "@/lib/data";
+import type { LiveMonitorDataset, LiveMonitorKpis, LiveMonitorRow, LiveMonitorStatus } from "@/lib/data";
 import { parseKenyaDateTime } from "@/lib/dateRange";
+import { computeDirection } from "@/lib/liveMonitorDirection";
+import { resolveGeofence } from "@/lib/motrexGeofences";
 import {
   MOTREX_GROUP_ID,
   MOTREX_RESOURCE_ID,
@@ -17,7 +19,7 @@ import {
   type RawRow,
 } from "./client";
 
-function shiftWialonDateTime(value: string): string {
+function formatWialonDateTime(value: string): string {
   const raw = String(value ?? "").trim();
   if (!raw || raw === "-----") return raw;
   const match = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
@@ -30,7 +32,6 @@ function shiftWialonDateTime(value: string): string {
   const ss = Number(match[6] ?? 0);
   const dt = new Date(yyyy, mm - 1, dd, hh, min, ss);
   if (Number.isNaN(dt.getTime())) return raw;
-  dt.setHours(dt.getHours() + 3);
   const outDd = String(dt.getDate()).padStart(2, "0");
   const outMm = String(dt.getMonth() + 1).padStart(2, "0");
   const outYy = dt.getFullYear();
@@ -43,15 +44,12 @@ function shiftWialonDateTime(value: string): string {
 function parseLiveRows(
   headers: string[],
   rawRows: RawRow[],
-  windowFromMs: number,
-  windowToMs: number,
 ): LiveMonitorRow[] {
   const idxVehicle = pickAny(headers, [/group|vehicle|unit|name/]);
   const idxLocation = pickAny(headers, [/location|address|place|position/]);
   const idxLastUpdate = pickAny(headers, [/last update|last message|time|date/]);
   const idxSpeed = pickAny(headers, [/speed/]);
-  const idxStatus = pickAny(headers, [/status/]);
-
+  const freshSinceMs = Date.now() - 60 * 60 * 1000;
   return rawRows.map((row) => {
     const cells = row.c ?? [];
     const vehicle = cellText(cells[idxVehicle >= 0 ? idxVehicle : 0]);
@@ -59,42 +57,54 @@ function parseLiveRows(
     const location = cellText(locCell);
     const coords = cellCoords(locCell);
     const lastRaw = cellText(cells[idxLastUpdate >= 0 ? idxLastUpdate : 2]);
-    const lastUpdate = shiftWialonDateTime(lastRaw) || lastRaw;
+    const lastUpdate = formatWialonDateTime(lastRaw) || lastRaw;
     const speedKmh = toNumber(cellText(cells[idxSpeed >= 0 ? idxSpeed : 3]));
-    const statusRaw = idxStatus >= 0 ? cellText(cells[idxStatus]) : "";
-    const status =
-      statusRaw ||
-      (speedKmh > 0 ? "🟢 Moving" : "🔴 Stationary");
 
     let updatedInWindow = false;
+    let lastUpdateMs: number | null = null;
     const parsed = parseKenyaDateTime(lastUpdate.replace(" ", "T"));
     if (!Number.isNaN(parsed)) {
-      updatedInWindow = parsed >= windowFromMs && parsed <= windowToMs;
+      lastUpdateMs = parsed;
+      updatedInWindow = parsed >= freshSinceMs;
     }
+    const statusCategory: LiveMonitorStatus = !updatedInWindow ? "unknown" : speedKmh > 5 ? "moving" : "stationary";
+    const status =
+      statusCategory === "moving"
+        ? "🟢 Moving"
+        : statusCategory === "stationary"
+          ? "🔴 Stationary"
+          : "⚪ Unknown";
 
-    return {
+    const geofence = resolveGeofence(coords.lat, coords.lon, location);
+    const currentLocation = geofence ?? (location || "—");
+
+    const baseRow = {
       vehicle,
-      currentLocation: location || "—",
+      currentLocation,
       lat: coords.lat,
       lon: coords.lon,
       lastUpdate: lastUpdate || "—",
+      lastUpdateMs,
+      geofence,
       speedKmh,
       status,
+      statusCategory,
       updatedInWindow,
+    };
+
+    return {
+      ...baseRow,
+      direction: computeDirection(baseRow, undefined),
     };
   });
 }
 
 function computeKpis(rows: LiveMonitorRow[]): LiveMonitorKpis {
   const tracked = rows.length;
-  const notUpdatedInWindow = rows.filter((r) => !r.updatedInWindow).length;
-  const active = rows.filter((r) => r.speedKmh > 0).length;
-  const stationary = Math.max(0, tracked - active);
-  const avgSpeed =
-    tracked > 0
-      ? Math.round((rows.reduce((s, r) => s + r.speedKmh, 0) / tracked) * 10) / 10
-      : 0;
-  return { tracked, notUpdatedInWindow, active, stationary, avgSpeed };
+  const moving = rows.filter((r) => r.statusCategory === "moving").length;
+  const stationary = rows.filter((r) => r.statusCategory === "stationary").length;
+  const unknown = rows.filter((r) => r.statusCategory === "unknown").length;
+  return { tracked, moving, stationary, unknown };
 }
 
 export async function fetchLiveMonitor(fromMs: number, toMs: number): Promise<LiveMonitorDataset> {
@@ -128,7 +138,7 @@ export async function fetchLiveMonitor(fromMs: number, toMs: number): Promise<Li
       }
     }
 
-    const rows = parseLiveRows(headers, rawRows, fromMs, toMs).sort((a, b) =>
+    const rows = parseLiveRows(headers, rawRows).sort((a, b) =>
       a.vehicle.localeCompare(b.vehicle),
     );
 

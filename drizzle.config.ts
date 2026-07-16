@@ -9,6 +9,6 @@ export default defineConfig({
   out: "./drizzle",
   dialect: "postgresql",
   dbCredentials: {
-    url: process.env.MotrexDB ?? process.env.motrexneondb ?? "",
+    url: process.env.MotrexTransferDB ?? process.env.MotrexDB ?? "",
   },
 });

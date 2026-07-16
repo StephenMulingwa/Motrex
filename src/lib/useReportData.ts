@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   getEcoDefaultRange,
   getTripsDefaultRange,
+  getTripsSummaryDefaultRange,
   getUtilizationDefaultRange,
   getYardsDefaultRange,
 } from "@/lib/dateRange";
@@ -34,6 +35,8 @@ function defaultRangeForType(reportType: StoredReportType): { from: string; to: 
       return getUtilizationDefaultRange();
     case "eco_driving":
       return getEcoDefaultRange();
+    case "trips_summary":
+      return getTripsSummaryDefaultRange();
     default:
       return getUtilizationDefaultRange();
   }
@@ -73,8 +76,11 @@ function fetchReportData(reportType: StoredReportType, from: string, to: string)
 }
 
 export function preloadDefaultReports(): Promise<ReportApiResponse[]> {
+  const reportTypes = STORED_REPORT_TYPES.filter(
+    (reportType) => reportType !== "yards" && reportType !== "trips_summary",
+  );
   return Promise.all(
-    STORED_REPORT_TYPES.map((reportType) => {
+    reportTypes.map((reportType) => {
       const range = defaultRangeForType(reportType);
       return fetchReportData(reportType, range.from, range.to);
     }),
@@ -92,12 +98,16 @@ export function useReportData(reportType: StoredReportType) {
   const [loading, setLoading] = useState(() => !reportCache.has(initialCacheKey));
   const [error, setError] = useState<string | null>(null);
 
-  const run = useCallback(() => {
+  const run = useCallback((overrideFrom?: string, overrideTo?: string) => {
+    const nextFrom = typeof overrideFrom === "string" ? overrideFrom : fromDate;
+    const nextTo = typeof overrideTo === "string" ? overrideTo : toDate;
+    if (typeof overrideFrom === "string") setFromDate(overrideFrom);
+    if (typeof overrideTo === "string") setToDate(overrideTo);
     setLoading(true);
     setError(null);
-    setAppliedFrom(fromDate);
-    setAppliedTo(toDate);
-  }, [fromDate, setAppliedFrom, setAppliedTo, setError, setLoading, toDate]);
+    setAppliedFrom(nextFrom);
+    setAppliedTo(nextTo);
+  }, [fromDate, toDate]);
 
   useEffect(() => {
     let cancelled = false;

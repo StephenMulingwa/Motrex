@@ -6,7 +6,7 @@ import {
   ensureSchema,
   upsertReportSnapshot,
 } from "@/lib/reportStore";
-import { executeAllStoredReports } from "@/lib/wialon/reports";
+import { executeStoredReport, withWialonRetry } from "@/lib/wialon/reports";
 
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
@@ -30,15 +30,20 @@ export async function GET(request: Request) {
 
   try {
     await ensureSchema();
-    const results = await executeAllStoredReports(dateStr);
-    for (const result of results) {
+    const types = ["yards", "trips"] as const;
+    const results = [];
+    for (const reportType of types) {
+      const result = await withWialonRetry(`${dateStr} / ${reportType}`, () =>
+        executeStoredReport(reportType, dateStr),
+      );
       await upsertReportSnapshot(result);
-      (details.results as unknown[]).push({
+      results.push({
         reportType: result.reportType,
         rowCount: result.payload.rows?.length ?? Object.keys(result.payload.pivot ?? {}).length,
         meta: result.rawMeta,
       });
     }
+    details.results = results;
   } catch (error) {
     ok = false;
     details.error = error instanceof Error ? error.message : String(error);

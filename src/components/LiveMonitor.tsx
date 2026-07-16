@@ -1,22 +1,72 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 import * as XLSX from "xlsx";
-import type { LiveMonitorDataset } from "@/lib/data";
+import type { LiveMonitorDataset, LiveMonitorDirection } from "@/lib/data";
 import { formatEatNow } from "@/lib/dateRange";
+import { formatTimeSince } from "@/lib/formatDuration";
+import { directionLabel } from "@/lib/liveMonitorDirection";
 import { SortHeader, sortRowsBy, useTableSort } from "@/lib/sortableTable";
 import { TABLE_PAGE_SIZE, paginateRows, totalPages } from "@/lib/tablePagination";
 import { registrationLabel } from "@/lib/vehicleLabels";
+import { exportMotrexReportPdf } from "@/lib/exportMotrexReportPdf";
 import PageHeader from "./PageHeader";
+import DateFilter from "./DateFilter";
 
 interface LiveMonitorProps {
   data: LiveMonitorDataset | null;
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
+  startDate: string;
+  endDate: string;
+  onStartChange: (value: string) => void;
+  onEndChange: (value: string) => void;
+  nowMs: number;
 }
 
-type LiveSortKey = "vehicle" | "currentLocation" | "lastUpdate" | "speedKmh" | "status";
+type LiveSortKey =
+  | "vehicle"
+  | "currentLocation"
+  | "lastUpdate"
+  | "timeSinceUpdate"
+  | "direction"
+  | "speedKmh"
+  | "status";
+
+function directionBadgeStyle(direction: "going" | "coming" | "inside"): CSSProperties {
+  if (direction === "going") {
+    return {
+      display: "inline-block",
+      padding: "2px 8px",
+      borderRadius: 6,
+      fontSize: ".75rem",
+      fontWeight: 700,
+      background: "rgba(37, 99, 235, 0.12)",
+      color: "#2563eb",
+    };
+  }
+  if (direction === "coming") {
+    return {
+      display: "inline-block",
+      padding: "2px 8px",
+      borderRadius: 6,
+      fontSize: ".75rem",
+      fontWeight: 700,
+      background: "rgba(22, 163, 74, 0.12)",
+      color: "#16a34a",
+    };
+  }
+  return {
+    display: "inline-block",
+    padding: "2px 8px",
+    borderRadius: 6,
+    fontSize: ".75rem",
+    fontWeight: 700,
+    background: "rgba(217, 119, 6, 0.12)",
+    color: "#d97706",
+  };
+}
 
 function mapsUrl(row: { currentLocation: string; lat: number | null; lon: number | null }) {
   if (row.lat != null && row.lon != null) {
@@ -28,24 +78,41 @@ function mapsUrl(row: { currentLocation: string; lat: number | null; lon: number
   return null;
 }
 
-export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMonitorProps) {
+export default function LiveMonitor({
+  data,
+  loading,
+  error,
+  onRefresh,
+  startDate,
+  endDate,
+  onStartChange,
+  onEndChange,
+  nowMs,
+}: LiveMonitorProps) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
-  const [freshnessFilter, setFreshnessFilter] = useState("");
+  const [directionFilter, setDirectionFilter] = useState<LiveMonitorDirection | "">("");
   const [page, setPage] = useState(1);
   const { sort, toggleSort } = useTableSort<LiveSortKey>(null);
 
   const filtered = useMemo(() => {
     const rows = data?.rows ?? [];
+    const query = search.trim().toLowerCase();
     return rows.filter((r) => {
-      if (search && !registrationLabel(r.vehicle).toLowerCase().includes(search.toLowerCase())) return false;
-      if (statusFilter === "moving" && r.speedKmh <= 0) return false;
-      if (statusFilter === "stationary" && r.speedKmh > 0) return false;
-      if (freshnessFilter === "updated" && !r.updatedInWindow) return false;
-      if (freshnessFilter === "not_updated" && r.updatedInWindow) return false;
+      if (query) {
+        const directionText = directionLabel(r.direction, r.geofence ?? r.currentLocation).toLowerCase();
+        const matchesSearch =
+          registrationLabel(r.vehicle).toLowerCase().includes(query) ||
+          r.currentLocation.toLowerCase().includes(query) ||
+          directionText.includes(query) ||
+          r.direction.toLowerCase().includes(query);
+        if (!matchesSearch) return false;
+      }
+      if (statusFilter && r.statusCategory !== statusFilter) return false;
+      if (directionFilter && r.direction !== directionFilter) return false;
       return true;
     });
-  }, [data, search, statusFilter, freshnessFilter]);
+  }, [data, search, statusFilter, directionFilter]);
 
   const sorted = useMemo(
     () =>
@@ -54,6 +121,8 @@ export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMon
         if (key === "vehicle") return registrationLabel(row.vehicle);
         if (key === "currentLocation") return row.currentLocation;
         if (key === "lastUpdate") return row.lastUpdate;
+        if (key === "timeSinceUpdate") return row.lastUpdateMs ?? 0;
+        if (key === "direction") return directionLabel(row.direction, row.geofence ?? row.currentLocation);
         if (key === "status") return row.status;
         return "";
       }),
@@ -68,12 +137,44 @@ export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMon
       Vehicle: registrationLabel(r.vehicle),
       Location: r.currentLocation,
       "Last Update": r.lastUpdate,
+      "Time Since Update": formatTimeSince(r.lastUpdateMs, nowMs),
+      Direction: directionLabel(r.direction, r.geofence ?? r.currentLocation),
       "Speed (km/h)": r.speedKmh,
       Status: r.status,
     }));
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Fleet Status");
     XLSX.writeFile(wb, `Motrex_LiveMonitor_${Date.now()}.xlsx`);
+  };
+
+  const exportPdf = () => {
+    exportMotrexReportPdf({
+      title: "Motrex Live Monitor",
+      subtitle: `${startDate} → ${endDate}`,
+      fileName: `Motrex_LiveMonitor_${Date.now()}.pdf`,
+      summary: [
+        { label: "Tracked Vehicles", value: String(kpis?.tracked ?? "—"), accent: "#2563eb" },
+        { label: "Moving", value: String(kpis?.moving ?? "—"), accent: "#16a34a" },
+        { label: "Stationary", value: String(kpis?.stationary ?? "—"), accent: "#2563eb" },
+        { label: "Unknown", value: String(kpis?.unknown ?? "—"), accent: "#64748b" },
+      ],
+      sections: [
+        {
+          heading: "Fleet Status",
+          head: [["#", "Vehicle", "Location", "Last Update", "Time Since Update", "Direction", "Speed (km/h)", "Status"]],
+          body: sorted.map((r, idx) => [
+            idx + 1,
+            registrationLabel(r.vehicle),
+            r.currentLocation,
+            r.lastUpdate,
+            formatTimeSince(r.lastUpdateMs, nowMs),
+            directionLabel(r.direction, r.geofence ?? r.currentLocation),
+            r.speedKmh,
+            r.status,
+          ]),
+        },
+      ],
+    });
   };
 
   const kpis = data?.kpis;
@@ -84,25 +185,17 @@ export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMon
       <PageHeader
         title="Live"
         titleAccent="Monitor"
-        subtitle="Real-time fleet status — SM_Motrex_Online Status (past 1 hour, EAT)"
+        subtitle="Real-time fleet status, selected EAT window"
         right={
-          <button
-            type="button"
-            onClick={onRefresh}
-            disabled={loading}
-            style={{
-              padding: "8px 16px",
-              borderRadius: 8,
-              border: "none",
-              background: "var(--accent)",
-              color: "#1a1200",
-              fontWeight: 600,
-              cursor: loading ? "wait" : "pointer",
-              opacity: loading ? 0.7 : 1,
-            }}
-          >
-            {loading ? "Refreshing…" : "Refresh"}
-          </button>
+          <DateFilter
+            startDate={startDate}
+            endDate={endDate}
+            onStartChange={onStartChange}
+            onEndChange={onEndChange}
+            onRun={onRefresh}
+            runLabel="Run"
+            running={loading}
+          />
         }
       />
 
@@ -115,9 +208,9 @@ export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMon
       >
         {[
           { label: "Tracked Vehicles", value: kpis?.tracked ?? "—", color: "var(--blue)" },
-          { label: "Active", value: kpis?.active ?? "—", color: "var(--green)" },
+          { label: "Moving", value: kpis?.moving ?? "—", color: "var(--green)" },
           { label: "Stationary", value: kpis?.stationary ?? "—", color: "var(--blue)" },
-          { label: "Avg speed", value: kpis ? `${kpis.avgSpeed} km/h` : "—", color: "var(--red)" },
+          { label: "Unknown", value: kpis?.unknown ?? "—", color: "#64748b" },
         ].map((k) => (
           <div
             key={k.label}
@@ -127,10 +220,13 @@ export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMon
               borderRadius: 12,
               padding: "16px 18px",
               boxShadow: "var(--shadow)",
+              position: "relative",
+              overflow: "hidden",
             }}
           >
-            <div style={{ fontSize: "1.6rem", fontWeight: 700, color: k.color }}>{k.value}</div>
-            <div style={{ fontSize: ".78rem", color: "var(--text2)", marginTop: 4 }}>{k.label}</div>
+            <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg, ${k.color}, transparent)` }} />
+            <div style={{ fontSize: "1.8rem", fontWeight: 800, color: "var(--text)" }}>{k.value}</div>
+            <div style={{ fontSize: ".72rem", color: "#000", marginTop: 6, textTransform: "uppercase", letterSpacing: ".06em", fontWeight: 800 }}>{k.label}</div>
           </div>
         ))}
       </div>
@@ -151,21 +247,26 @@ export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMon
         }}
       >
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 14, alignItems: "center" }}>
-          <input
-            type="text"
-            placeholder="Search vehicle…"
-            value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setPage(1);
-            }}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 8,
-              border: "1px solid var(--border)",
-              minWidth: 180,
-            }}
-          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <input
+              type="text"
+              placeholder="Search vehicle, location, direction…"
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                minWidth: 180,
+              }}
+            />
+            <span style={{ fontSize: ".75rem", color: "var(--text3)" }}>
+              Last fetch: {data ? formatEatNow() : "—"} · Auto-refresh 10 min
+            </span>
+          </div>
           <select
             value={statusFilter}
             onChange={(e) => {
@@ -177,19 +278,39 @@ export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMon
             <option value="">All status</option>
             <option value="moving">Moving</option>
             <option value="stationary">Stationary</option>
+            <option value="unknown">Unknown</option>
           </select>
           <select
-            value={freshnessFilter}
+            value={directionFilter}
             onChange={(e) => {
-              setFreshnessFilter(e.target.value);
+              setDirectionFilter(e.target.value as LiveMonitorDirection | "");
               setPage(1);
             }}
             style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid var(--border)" }}
           >
-            <option value="">All vehicles</option>
-            <option value="updated">Updated in window</option>
-            <option value="not_updated">Not updated in window</option>
+            <option value="">All directions</option>
+            <option value="going">Going</option>
+            <option value="coming">Coming</option>
+            <option value="inside">Inside</option>
           </select>
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={loading}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: "1px solid rgba(139,16,38,0.35)",
+              background: "linear-gradient(135deg, #8b1026, #c41e3a)",
+              color: "#fff",
+              fontWeight: 800,
+              boxShadow: "0 8px 18px rgba(139,16,38,0.2)",
+              cursor: loading ? "wait" : "pointer",
+              opacity: loading ? 0.72 : 1,
+            }}
+          >
+            {loading ? "Refreshing..." : "Refresh"}
+          </button>
           <button
             type="button"
             onClick={exportExcel}
@@ -197,16 +318,32 @@ export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMon
               marginLeft: "auto",
               padding: "8px 14px",
               borderRadius: 8,
-              border: "1px solid var(--border)",
-              background: "var(--surface2)",
+              border: "1px solid rgba(139,16,38,0.35)",
+              background: "linear-gradient(135deg, #8b1026, #c41e3a)",
+              color: "#fff",
+              fontWeight: 800,
+              boxShadow: "0 8px 18px rgba(139,16,38,0.2)",
               cursor: "pointer",
             }}
           >
             Export Excel
           </button>
-          <span style={{ fontSize: ".75rem", color: "var(--text3)" }}>
-            Last fetch: {data ? formatEatNow() : "—"} · Auto-refresh 5 min
-          </span>
+          <button
+            type="button"
+            onClick={exportPdf}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: "1px solid rgba(139,16,38,0.35)",
+              background: "linear-gradient(135deg, #8b1026, #c41e3a)",
+              color: "#fff",
+              fontWeight: 800,
+              boxShadow: "0 8px 18px rgba(139,16,38,0.2)",
+              cursor: "pointer",
+            }}
+          >
+            Export PDF
+          </button>
         </div>
 
         <div className="data-table-scroll" style={{ overflowX: "auto" }}>
@@ -217,6 +354,8 @@ export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMon
                 <SortHeader sortKey="vehicle" label="Vehicle" sort={sort} onToggle={toggleSort} thStyle={thStyle} />
                 <SortHeader sortKey="currentLocation" label="Current location" sort={sort} onToggle={toggleSort} thStyle={thStyle} />
                 <SortHeader sortKey="lastUpdate" label="Last Update" sort={sort} onToggle={toggleSort} thStyle={thStyle} />
+                <SortHeader sortKey="timeSinceUpdate" label="Time Since Update" sort={sort} onToggle={toggleSort} thStyle={thStyle} />
+                <SortHeader sortKey="direction" label="Direction" sort={sort} onToggle={toggleSort} thStyle={thStyle} />
                 <SortHeader sortKey="speedKmh" label="Speed (km/h)" sort={sort} onToggle={toggleSort} thStyle={thStyle} align="right" />
                 <SortHeader sortKey="status" label="Status" sort={sort} onToggle={toggleSort} thStyle={thStyle} />
               </tr>
@@ -224,13 +363,13 @@ export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMon
             <tbody>
               {loading && !data ? (
                 <tr>
-                  <td colSpan={6} style={{ padding: 24, textAlign: "center", color: "var(--text2)" }}>
+                  <td colSpan={8} style={{ padding: 24, textAlign: "center", color: "var(--text2)" }}>
                     Loading live fleet data…
                   </td>
                 </tr>
               ) : sorted.length === 0 ? (
                 <tr>
-                  <td colSpan={6} style={{ padding: 24, textAlign: "center", color: "var(--text2)" }}>
+                  <td colSpan={8} style={{ padding: 24, textAlign: "center", color: "var(--text2)" }}>
                     No vehicles match filters.
                   </td>
                 </tr>
@@ -252,6 +391,12 @@ export default function LiveMonitor({ data, loading, error, onRefresh }: LiveMon
                         )}
                       </td>
                       <td style={{ padding: "8px 12px" }}>{row.lastUpdate}</td>
+                      <td style={{ padding: "8px 12px" }}>{formatTimeSince(row.lastUpdateMs, nowMs)}</td>
+                      <td style={{ padding: "8px 12px" }}>
+                        <span style={directionBadgeStyle(row.direction)}>
+                          {directionLabel(row.direction, row.geofence ?? row.currentLocation)}
+                        </span>
+                      </td>
                       <td style={{ padding: "8px 12px", textAlign: "right" }}>{row.speedKmh}</td>
                       <td style={{ padding: "8px 12px" }}>{row.status}</td>
                     </tr>

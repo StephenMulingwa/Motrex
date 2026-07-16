@@ -22,7 +22,6 @@ interface MapTabProps {
 export default function MapTab({ data, loading, error, onRefresh }: MapTabProps) {
   const [statusFilter, setStatusFilter] = useState("");
   const [vehicleSearch, setVehicleSearch] = useState("");
-  const [showVehicles, setShowVehicles] = useState(false);
 
   const mapUnits = useMemo((): FleetMapUnit[] => {
     const seen = new Set<string>();
@@ -41,6 +40,7 @@ export default function MapTab({ data, loading, error, onRefresh }: MapTabProps)
         lastSeen: row.lastUpdate || "N/A",
         speedKmh: row.speedKmh,
         status: row.status,
+        statusCategory: row.statusCategory,
         lat: row.lat,
         lon: row.lon,
       });
@@ -50,22 +50,20 @@ export default function MapTab({ data, loading, error, onRefresh }: MapTabProps)
   }, [data?.rows]);
 
   const filteredUnits = useMemo(() => {
-    if (!showVehicles) return [];
     const query = vehicleSearch.trim().toLowerCase();
     return mapUnits.filter((unit) => {
       if (query && !unit.registrationNumber.toLowerCase().includes(query)) return false;
-      if (statusFilter === "moving" && unit.speedKmh <= 0) return false;
-      if (statusFilter === "stationary" && unit.speedKmh > 0) return false;
+      if (statusFilter && unit.statusCategory !== statusFilter) return false;
       return true;
     });
-  }, [mapUnits, showVehicles, statusFilter, vehicleSearch]);
+  }, [mapUnits, statusFilter, vehicleSearch]);
 
   return (
     <div style={{ width: "100%", maxWidth: "100%", minWidth: 0 }}>
       <PageHeader
         title="Fleet"
         titleAccent="Map"
-        subtitle="Live map from SM_Motrex_Online Status"
+        subtitle="Live fleet positions with vehicle markers shown by default"
         right={
           <button
             type="button"
@@ -105,29 +103,9 @@ export default function MapTab({ data, loading, error, onRefresh }: MapTabProps)
           <option value="">All status</option>
           <option value="moving">Moving</option>
           <option value="stationary">Stationary</option>
+          <option value="unknown">Unknown</option>
         </select>
-        <button
-          type="button"
-          onClick={() => setShowVehicles((current) => !current)}
-          disabled={loading || !mapUnits.length}
-          style={{
-            padding: "8px 14px",
-            borderRadius: 8,
-            border: "1px solid var(--border)",
-            background: showVehicles ? "var(--surface2)" : "var(--accent)",
-            color: showVehicles ? "var(--text)" : "#1a1200",
-            fontWeight: 700,
-            cursor: loading || !mapUnits.length ? "wait" : "pointer",
-          }}
-        >
-          {showVehicles ? "Hide vehicles" : "Show vehicles"}
-        </button>
       </div>
-      {!showVehicles && (
-        <p style={{ margin: "0 0 12px", color: "var(--text2)", fontSize: ".82rem", fontWeight: 600 }}>
-          Map loaded without vehicle markers for best performance. Click “Show vehicles” when you want to display the fleet.
-        </p>
-      )}
       <FleetMapInner units={filteredUnits} />
     </div>
   );

@@ -2,6 +2,7 @@ import type { ReportSnapshotPayload } from "@/lib/data";
 import {
   ECO_INLINE_TEMPLATE,
   ECO_RESOURCE_ID,
+  GROUP_TRIPS_FALLBACK_BATCH_SIZE,
   MOTREX_GROUP_ID,
   MOTREX_RESOURCE_ID,
   TEMPLATES,
@@ -11,8 +12,9 @@ import {
   UTILIZATION_RESOURCE_ID,
   type StoredReportType,
 } from "@/lib/motrexConfig";
-import { dayBoundsUnix, todayEatDateString } from "@/lib/dateRange";
-import { buildMotrexTripTables } from "@/lib/motrexTrips";
+import { dayBoundsUnix, enumerateDates, todayEatDateString } from "@/lib/dateRange";
+import { buildMotrexTripTables, matchGroupTripTable } from "@/lib/motrexTrips";
+import { registrationKey } from "@/lib/vehicleLabels";
 import {
   execReport,
   fetchAllTableData,
@@ -21,6 +23,7 @@ import {
   toNumber,
   wialonLogin,
   wialonLogout,
+  type ReportTableMeta,
 } from "./client";
 
 export interface ReportExecutionResult {
@@ -30,14 +33,15 @@ export interface ReportExecutionResult {
   rawMeta: Record<string, unknown>;
 }
 
-async function runTemplateReportForBounds(
+export async function runTemplateReportForBounds(
   sid: string,
   templateId: number,
   from: number,
   to: number,
   reportObjectIdList?: number[],
+  forceRemoteExec = false,
 ): Promise<{ rows: Record<string, string>[]; headers: string[]; tableIndex: number }> {
-  const useRemoteExec = (reportObjectIdList?.length ?? 0) > 150;
+  const useRemoteExec = forceRemoteExec || (reportObjectIdList?.length ?? 0) > 150;
   const objectId = reportObjectIdList?.[0] ?? MOTREX_GROUP_ID;
   const extraObjectIds = reportObjectIdList?.length ? reportObjectIdList.slice(1) : undefined;
   let tables;
@@ -77,13 +81,224 @@ async function runTemplateReportForBounds(
   return best;
 }
 
-function splitTripsBatches<T>(items: T[]): T[][] {
-  const batches: T[][] = [];
-  for (let i = 0; i < 5; i += 1) {
-    batches.push(items.slice(i * 100, i * 100 + 100));
+/** Fetch every non-empty table from a Motrex resource template, tagging rows with the table name. */
+export async function runTemplateAllTablesForBounds(
+  sid: string,
+  templateId: number,
+  from: number,
+  to: number,
+  reportObjectIdList?: number[],
+  forceRemoteExec = false,
+): Promise<{ rows: Record<string, string>[]; tables: Array<{ name: string; rowCount: number; index: number }> }> {
+  // Template 62 is avl_unit_group: reportObjectId must be the group; unit IDs go in reportObjectIdList.
+  const useRemoteExec = forceRemoteExec || (reportObjectIdList?.length ?? 0) > 25;
+  const objectId = MOTREX_GROUP_ID;
+  const unitList = reportObjectIdList?.length ? reportObjectIdList : undefined;
+  let tables: ReportTableMeta[];
+  try {
+    ({ tables } = await execReport(sid, {
+      resourceId: MOTREX_RESOURCE_ID,
+      templateId,
+      objectId,
+      reportObjectIdList: unitList,
+      from,
+      to,
+      remoteExec: useRemoteExec,
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // 4/6 = duration/internal; 7 = access denied (often wrong binding or transient ACL on Track3)
+    if (!/Track3 Database error (4|6|7)/.test(message)) throw error;
+    const template = await getReportTemplateData(sid, MOTREX_RESOURCE_ID, templateId);
+    ({ tables } = await execReport(sid, {
+      resourceId: MOTREX_RESOURCE_ID,
+      objectId,
+      reportObjectIdList: unitList,
+      from,
+      to,
+      inlineTemplate: template,
+      remoteExec: true,
+    }));
   }
-  batches.push(items.slice(500));
-  return batches.filter((batch) => batch.length > 0);
+
+  const merged: Record<string, string>[] = [];
+  const tableMeta: Array<{ name: string; rowCount: number; index: number }> = [];
+
+  for (let i = 0; i < tables.length; i += 1) {
+    if (tables[i].rows <= 0) continue;
+    const data = await fetchAllTableData(sid, tables, i);
+    const tableName = tables[i].name || `table_${i}`;
+    // Prefer known group-trip tables; still keep unnamed detalization if columns look like trips.
+    const isKnown = Boolean(matchGroupTripTable(tableName));
+    const looksLikeTrip = data.headers.some((h) => /trip\s*from|trip\s*to|beginning/i.test(h));
+    if (!isKnown && !looksLikeTrip) continue;
+
+    for (const row of data.rows) {
+      merged.push({ ...row, _wialonTable: tableName });
+    }
+    tableMeta.push({ name: tableName, rowCount: data.rows.length, index: i });
+  }
+
+  return { rows: merged, tables: tableMeta };
+}
+
+function shouldTripsSplitFallback(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return /Track3 Database error (1|4|7|1003|1004|1005|6)|LIMIT exec_report_duration|LIMIT msgs_activity|timeout|temporar|ECONNRESET|ETIMEDOUT|fetch failed|Invalid session|remote report/i.test(
+    msg,
+  );
+}
+
+async function fetchGroupTripsBatchWithFallback(
+  from: number,
+  to: number,
+  unitIds: number[] | undefined,
+  label: string,
+): Promise<{ rows: Record<string, string>[]; tables: Array<{ name: string; rowCount: number; index: number }> }> {
+  type BatchResult = { rows: Record<string, string>[]; tables: Array<{ name: string; rowCount: number; index: number }> };
+  const minSplit = GROUP_TRIPS_FALLBACK_BATCH_SIZE;
+
+  async function runFresh(ids: number[] | undefined, attemptLabel: string): Promise<BatchResult> {
+    const sid = await wialonLogin();
+    try {
+      return await withWialonRetry(
+        attemptLabel,
+        // Always remoteExec for group-rides template — sync often hits error 4 on Track3.
+        () => runTemplateAllTablesForBounds(sid, TEMPLATES.groupTrips, from, to, ids, true),
+        [60_000, 120_000, 180_000],
+      );
+    } finally {
+      await wialonLogout(sid).catch(() => undefined);
+    }
+  }
+
+  async function run(ids: number[] | undefined, attemptLabel: string): Promise<BatchResult> {
+    try {
+      return await runFresh(ids, attemptLabel);
+    } catch (error) {
+      if (!ids || ids.length <= minSplit || !shouldTripsSplitFallback(error)) throw error;
+      const mid = Math.ceil(ids.length / 2);
+      console.warn(`${attemptLabel} failed — fallback split: ${mid} + ${ids.length - mid}`);
+      await new Promise((r) => setTimeout(r, 15_000));
+      const a = await run(ids.slice(0, mid), `${attemptLabel} (${mid})`);
+      await new Promise((r) => setTimeout(r, 10_000));
+      const b = await run(ids.slice(mid), `${attemptLabel} (${ids.length - mid})`);
+      return { rows: [...a.rows, ...b.rows], tables: [...a.tables, ...b.tables] };
+    }
+  }
+
+  return run(unitIds, label);
+}
+
+function splitUtilizationFallbackBatches(unitIds: number[]): [number[], number[]] {
+  return [unitIds.slice(0, 305), unitIds.slice(305)];
+}
+
+async function fetchUtilizationTripRows(
+  sid: string,
+  from: number,
+  to: number,
+  unitIds?: number[],
+): Promise<{ rows: Record<string, string>[]; tableIndex: number }> {
+  const useBatch = Boolean(unitIds?.length);
+  const objectId = MOTREX_GROUP_ID;
+  const reportObjectIdList = useBatch ? unitIds : undefined;
+  const remoteExec = useBatch && unitIds!.length > 150;
+
+  const { tables } = await execReport(sid, {
+    resourceId: UTILIZATION_RESOURCE_ID,
+    objectId,
+    reportObjectIdList,
+    from,
+    to,
+    inlineTemplate: UTILIZATION_INLINE_TEMPLATE as unknown as Record<string, unknown>,
+    remoteExec,
+  });
+
+  const tripsTableIdx = tables.findIndex((t) =>
+    t.header.some((h) => /mileage|beginning/i.test(h)),
+  );
+  const idx = tripsTableIdx >= 0 ? tripsTableIdx : 1;
+  const data = await fetchAllTableData(sid, tables, idx);
+  return { rows: data.rows, tableIndex: idx };
+}
+
+async function executeUtilizationForBounds({
+  from,
+  to,
+  reportDate,
+  started,
+}: {
+  from: number;
+  to: number;
+  reportDate: string;
+  started: number;
+}): Promise<ReportExecutionResult> {
+  let sid = await wialonLogin();
+  try {
+    const label = `${reportDate} / utilization`;
+    let tripRows: Record<string, string>[] = [];
+    let tableIndex = 0;
+    const extraMeta: Record<string, unknown> = { executionMode: "full_group" };
+
+    const unitIds = await fetchUnitGroupUnitIds(sid, MOTREX_GROUP_ID);
+    extraMeta.unitCount = unitIds.length;
+
+    try {
+      const full = await withWialonRetry(label, () => fetchUtilizationTripRows(sid, from, to));
+      tripRows = full.rows;
+      tableIndex = full.tableIndex;
+    } catch (error) {
+      if (!shouldUtilizationSplitFallback(error)) throw error;
+
+      await wialonLogout(sid).catch(() => undefined);
+      sid = await wialonLogin();
+
+      const [batch1, batch2] = splitUtilizationFallbackBatches(unitIds);
+      console.warn(
+        `${label} timed out — fallback split: ${batch1.length} + ${batch2.length} vehicles (remoteExec)`,
+      );
+
+      extraMeta.executionMode = "fallback_split";
+      extraMeta.fallbackBatches = [batch1.length, batch2.length];
+
+      const batchMeta: Array<{ batch: number; unitCount: number; rowCount: number; tableIndex: number }> = [];
+
+      for (const [idx, batch] of [batch1, batch2].entries()) {
+        if (!batch.length) continue;
+        console.log(`  Running utilization fallback batch ${idx + 1}/2 (${batch.length} vehicles) …`);
+        const result = await withWialonRetry(`${label} batch ${idx + 1}`, () =>
+          fetchUtilizationTripRows(sid, from, to, batch),
+        );
+        tripRows.push(...result.rows);
+        batchMeta.push({
+          batch: idx + 1,
+          unitCount: batch.length,
+          rowCount: result.rows.length,
+          tableIndex: result.tableIndex,
+        });
+        tableIndex = result.tableIndex;
+      }
+      extraMeta.batches = batchMeta;
+    }
+
+    const payload = buildUtilizationPivot(tripRows, reportDate);
+    return {
+      reportType: "utilization",
+      reportDate,
+      payload,
+      rawMeta: {
+        rowCount: tripRows.length,
+        tableIndex,
+        executionMs: Date.now() - started,
+        from,
+        to,
+        ...extraMeta,
+      },
+    };
+  } finally {
+    await wialonLogout(sid).catch(() => undefined);
+  }
 }
 
 function sleep(ms: number) {
@@ -92,7 +307,13 @@ function sleep(ms: number) {
 
 function shouldRetryWialonError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error);
-  return /Track3 Database error 1005|LIMIT exec_report_duration|timeout|temporar|ECONNRESET|ETIMEDOUT|fetch failed/i.test(msg);
+  return /Track3 Database error (1|1003|1004|1005)|LIMIT exec_report_duration|LIMIT msgs_activity|timeout|temporar|ECONNRESET|ETIMEDOUT|fetch failed|Invalid session/i.test(msg);
+}
+
+/** Full-group utilization failed — try 305+304 split (timeouts, duration limits, Wialon error 6). */
+function shouldUtilizationSplitFallback(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return shouldRetryWialonError(error) || /Track3 Database error 6/i.test(msg);
 }
 
 export async function withWialonRetry<T>(
@@ -133,7 +354,7 @@ function buildUtilizationPivot(
     const mileageKey = Object.keys(row).find((k) => /mileage|distance/i.test(k));
     const beginningKey = Object.keys(row).find((k) => /beginning|time/i.test(k));
 
-    const vehicle = vehicleKey ? String(row[vehicleKey] ?? "").trim() : "";
+    const vehicle = registrationKey(vehicleKey ? String(row[vehicleKey] ?? "").trim() : "");
     if (!vehicle || vehicle === "-----") continue;
 
     const mileageRaw = mileageKey ? String(row[mileageKey] ?? "") : "0";
@@ -206,7 +427,6 @@ function buildEcoPivot(ecoRows: Record<string, string>[]): ReportSnapshotPayload
 }
 
 async function executeTripsForBounds({
-  sid,
   from,
   to,
   reportDate,
@@ -214,7 +434,6 @@ async function executeTripsForBounds({
   intervalEnd,
   started,
 }: {
-  sid: string;
   from: number;
   to: number;
   reportDate: string;
@@ -222,28 +441,64 @@ async function executeTripsForBounds({
   intervalEnd: string;
   started: number;
 }): Promise<ReportExecutionResult> {
-  const unitIds = await fetchUnitGroupUnitIds(sid, MOTREX_GROUP_ID);
-  const batches = splitTripsBatches(unitIds);
+  const sid = await wialonLogin();
+  let unitIds: number[];
+  try {
+    unitIds = await fetchUnitGroupUnitIds(sid, MOTREX_GROUP_ID);
+  } finally {
+    await wialonLogout(sid).catch(() => undefined);
+  }
+
   const rawTripRows: Record<string, string>[] = [];
-  const batchMeta: Array<{ batch: number; unitCount: number; rowCount: number; tableIndex: number }> = [];
-  let tableIndex = 0;
+  const batchMeta: Array<{
+    batch: number;
+    unitCount: number;
+    rowCount: number;
+    tables: Array<{ name: string; rowCount: number; index: number }>;
+  }> = [];
 
-  console.log(`  Trips unit batches: ${batches.map((batch) => batch.length).join(" + ")} vehicles`);
+  const dates = enumerateDates(intervalStart, intervalEnd);
+  const useDaily = dates.length > 1;
 
-  for (const [idx, batch] of batches.entries()) {
-    console.log(`  Running trips batch ${idx + 1}/${batches.length} (${batch.length} vehicles) …`);
-    const result = await withWialonRetry(
-      `${intervalStart} → ${intervalEnd} / trips batch ${idx + 1}`,
-      () => runTemplateReportForBounds(sid, TEMPLATES.athiTororoTrips, from, to, batch),
+  if (useDaily) {
+    console.log(
+      `  Group Trips (template ${TEMPLATES.groupTrips}): ${dates.length} day-by-day full-group runs (${unitIds.length} vehicles)…`,
     );
-    rawTripRows.push(...result.rows);
+    for (const [idx, dateStr] of dates.entries()) {
+      console.log(`  Running group trips day ${idx + 1}/${dates.length} (${dateStr}) …`);
+      const dayBounds = dayBoundsUnix(dateStr);
+      const result = await fetchGroupTripsBatchWithFallback(
+        dayBounds.from,
+        dayBounds.to,
+        undefined,
+        `${dateStr} / group trips day`,
+      );
+      rawTripRows.push(...result.rows);
+      batchMeta.push({
+        batch: idx + 1,
+        unitCount: unitIds.length,
+        rowCount: result.rows.length,
+        tables: result.tables,
+      });
+      await new Promise((r) => setTimeout(r, 5_000));
+    }
+  } else {
+    console.log(
+      `  Group Trips (template ${TEMPLATES.groupTrips}): full Motrex group (${unitIds.length} vehicles) for ${intervalStart}…`,
+    );
+    const full = await fetchGroupTripsBatchWithFallback(
+      from,
+      to,
+      undefined,
+      `${intervalStart} → ${intervalEnd} / group trips full group`,
+    );
+    rawTripRows.push(...full.rows);
     batchMeta.push({
-      batch: idx + 1,
-      unitCount: batch.length,
-      rowCount: result.rows.length,
-      tableIndex: result.tableIndex,
+      batch: 1,
+      unitCount: unitIds.length,
+      rowCount: full.rows.length,
+      tables: full.tables,
     });
-    tableIndex = result.tableIndex;
   }
 
   const tripRows = buildMotrexTripTables(rawTripRows, reportDate);
@@ -252,9 +507,10 @@ async function executeTripsForBounds({
     reportDate,
     payload: { rows: tripRows },
     rawMeta: {
+      templateId: TEMPLATES.groupTrips,
+      templateName: "SM_Motrex - Group Trips",
       rowCount: tripRows.length,
       rawRowCount: rawTripRows.length,
-      tableIndex,
       executionMs: Date.now() - started,
       from,
       to,
@@ -280,13 +536,28 @@ async function executeEcoDrivingForBounds({
   to: number;
   extraMeta: Record<string, unknown>;
 }): Promise<{ payload: ReportSnapshotPayload; rowCount: number; tableIndex: number }> {
-  const { tables } = await execReport(sid, {
-    resourceId: ECO_RESOURCE_ID,
-    objectId: MOTREX_GROUP_ID,
-    from,
-    to,
-    inlineTemplate: ECO_INLINE_TEMPLATE as unknown as Record<string, unknown>,
-  });
+  let tables;
+  try {
+    ({ tables } = await execReport(sid, {
+      resourceId: ECO_RESOURCE_ID,
+      objectId: MOTREX_GROUP_ID,
+      from,
+      to,
+      inlineTemplate: ECO_INLINE_TEMPLATE as unknown as Record<string, unknown>,
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/Track3 Database error (4|6|1003|1005)/.test(message)) throw error;
+    console.warn(`  Eco Driving sync failed (${message}) — retrying with remoteExec`);
+    ({ tables } = await execReport(sid, {
+      resourceId: ECO_RESOURCE_ID,
+      objectId: MOTREX_GROUP_ID,
+      from,
+      to,
+      inlineTemplate: ECO_INLINE_TEMPLATE as unknown as Record<string, unknown>,
+      remoteExec: true,
+    }));
+  }
   const ecoIdx = tables.findIndex((t) =>
     t.header.some((h) => /violation|mileage/i.test(h)),
   );
@@ -302,15 +573,31 @@ export async function executeStoredReport(
   dateStr: string,
 ): Promise<ReportExecutionResult> {
   const started = Date.now();
+  const bounds = dayBoundsUnix(dateStr);
+  const from = bounds.from;
+  const to =
+    (reportType === "yards" || reportType === "trips") && dateStr === todayEatDateString()
+      ? Math.min(bounds.to, Math.floor(Date.now() / 1000))
+      : bounds.to;
+
+  if (reportType === "utilization") {
+    return executeUtilizationForBounds({ from, to, reportDate: dateStr, started });
+  }
+
+  if (reportType === "trips") {
+    return executeTripsForBounds({
+      from,
+      to,
+      reportDate: dateStr,
+      intervalStart: dateStr,
+      intervalEnd: dateStr,
+      started,
+    });
+  }
+
   const sid = await wialonLogin();
 
   try {
-    const bounds = dayBoundsUnix(dateStr);
-    const from = bounds.from;
-    const to =
-      (reportType === "yards" || reportType === "trips") && dateStr === todayEatDateString()
-        ? Math.min(bounds.to, Math.floor(Date.now() / 1000))
-        : bounds.to;
     let payload: ReportSnapshotPayload = { rows: [] };
     let rowCount = 0;
     let tableIndex = 0;
@@ -321,32 +608,6 @@ export async function executeStoredReport(
       payload = { rows: result.rows };
       rowCount = result.rows.length;
       tableIndex = result.tableIndex;
-    } else if (reportType === "trips") {
-      return executeTripsForBounds({
-        sid,
-        from,
-        to,
-        reportDate: dateStr,
-        intervalStart: dateStr,
-        intervalEnd: dateStr,
-        started,
-      });
-    } else if (reportType === "utilization") {
-      const { tables } = await execReport(sid, {
-        resourceId: UTILIZATION_RESOURCE_ID,
-        objectId: MOTREX_GROUP_ID,
-        from,
-        to,
-        inlineTemplate: UTILIZATION_INLINE_TEMPLATE as unknown as Record<string, unknown>,
-      });
-      const tripsTableIdx = tables.findIndex((t) =>
-        t.header.some((h) => /mileage|beginning/i.test(h)),
-      );
-      const idx = tripsTableIdx >= 0 ? tripsTableIdx : 1;
-      const data = await fetchAllTableData(sid, tables, idx);
-      payload = buildUtilizationPivot(data.rows, dateStr);
-      rowCount = data.rows.length;
-      tableIndex = idx;
     } else if (reportType === "eco_driving") {
       const result = await executeEcoDrivingForBounds({ sid, from, to, extraMeta });
       payload = result.payload;
@@ -374,23 +635,36 @@ export async function executeStoredReport(
 
 export async function executeHistoricalTripsReport(): Promise<ReportExecutionResult> {
   const started = Date.now();
-  const sid = await wialonLogin();
-  try {
-    const { from } = dayBoundsUnix(TRIPS_HISTORICAL_START);
-    const { to } = dayBoundsUnix(TRIPS_HISTORICAL_END);
-    console.log(`  Historical trips interval: ${TRIPS_HISTORICAL_START} 00:00 → ${TRIPS_HISTORICAL_END} 23:59`);
-    return executeTripsForBounds({
-      sid,
-      from,
-      to,
-      reportDate: TRIPS_HISTORICAL_END,
-      intervalStart: TRIPS_HISTORICAL_START,
-      intervalEnd: TRIPS_HISTORICAL_END,
-      started,
-    });
-  } finally {
-    await wialonLogout(sid);
-  }
+  const { from } = dayBoundsUnix(TRIPS_HISTORICAL_START);
+  const { to } = dayBoundsUnix(TRIPS_HISTORICAL_END);
+  console.log(`  Historical trips interval: ${TRIPS_HISTORICAL_START} 00:00 → ${TRIPS_HISTORICAL_END} 23:59`);
+  return executeTripsForBounds({
+    from,
+    to,
+    reportDate: TRIPS_HISTORICAL_END,
+    intervalStart: TRIPS_HISTORICAL_START,
+    intervalEnd: TRIPS_HISTORICAL_END,
+    started,
+  });
+}
+
+/** Execute SM_Motrex - Group Trips (template 62) for an arbitrary date range (week). */
+export async function executeGroupTripsWeek(
+  weekStart: string,
+  weekEnd: string,
+): Promise<ReportExecutionResult> {
+  const started = Date.now();
+  const { from } = dayBoundsUnix(weekStart);
+  const { to } = dayBoundsUnix(weekEnd);
+  console.log(`  Group trips week: ${weekStart} 00:00 → ${weekEnd} 23:59`);
+  return executeTripsForBounds({
+    from,
+    to,
+    reportDate: weekEnd,
+    intervalStart: weekStart,
+    intervalEnd: weekEnd,
+    started,
+  });
 }
 
 export async function executeAllStoredReports(dateStr: string): Promise<ReportExecutionResult[]> {

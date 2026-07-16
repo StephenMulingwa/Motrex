@@ -66,20 +66,7 @@ function compareSortable(a: unknown, b: unknown): number {
 export { parseDurationSeconds } from "./duration";
 
 /** Parse a Track3 timestamp like "12.05.2026 09:20:26" to a sortable millisecond value. */
-export function parseDateTimeMs(value: string | null | undefined): number {
-  const raw = String(value ?? "").trim();
-  if (!raw || raw === "-----" || raw === "—") return Number.NEGATIVE_INFINITY;
-  const m = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
-  if (!m) return Number.NEGATIVE_INFINITY;
-  const dd = Number(m[1]);
-  const mm = Number(m[2]);
-  const yyyy = Number(m[3]);
-  const hh = Number(m[4] ?? 0);
-  const mi = Number(m[5] ?? 0);
-  const ss = Number(m[6] ?? 0);
-  const ms = new Date(yyyy, mm - 1, dd, hh, mi, ss).getTime();
-  return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
-}
+export { parseDateTimeMs } from "./parseDateTime";
 
 /** Extract the first numeric value from a cell (handles "1.60 km", "81 km/h", "1,200", etc.). */
 export function parseFirstNumber(value: string | number | null | undefined): number {

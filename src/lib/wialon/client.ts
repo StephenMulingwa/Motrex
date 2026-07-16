@@ -101,6 +101,20 @@ export async function fetchTableRowsRaw(
   return toRows(rows);
 }
 
+export async function fetchTableSubrowsForParent(
+  sid: string,
+  tableIndex: number,
+  rowIndex: number,
+  indexTo = 1000,
+): Promise<RawRow[]> {
+  const subRows = await callWialon<unknown>(
+    "report/get_result_subrows",
+    { tableIndex, rowIndex, colIndex: 0, indexFrom: 0, indexTo },
+    sid,
+  );
+  return toRows(subRows);
+}
+
 async function fetchTableSubrowsRaw(
   sid: string,
   tableIndex: number,
@@ -133,6 +147,7 @@ export interface ReportTableMeta {
   header: string[];
   rows: number;
   index: number;
+  name: string;
 }
 
 export interface WialonReportTemplate {
@@ -144,7 +159,11 @@ export interface WialonReportTemplate {
   [key: string]: unknown;
 }
 
-type ExecReportResponse = { reportResult?: { tables?: Array<{ header?: string[]; rows?: number }> } };
+type ExecReportResponse = {
+  reportResult?: {
+    tables?: Array<{ header?: string[]; rows?: number; name?: string; label?: string; n?: string }>;
+  };
+};
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -152,12 +171,14 @@ function sleep(ms: number) {
 
 async function waitForRemoteReportResult(sid: string): Promise<ExecReportResponse> {
   for (let attempt = 0; attempt < 360; attempt += 1) {
-    const status = await callWialon<{ status?: number }>("report/get_report_status", {}, sid);
-    if (status.status === 4) {
+    const statusPayload = await callWialon<{ status?: number | string }>("report/get_report_status", {}, sid);
+    // Track3 may return status as a string; coerce so remoteExec can apply results.
+    const status = Number(statusPayload.status);
+    if (status === 4) {
       return callWialon<ExecReportResponse>("report/apply_report_result", {}, sid);
     }
-    if (status.status === 8 || status.status === 16) {
-      throw new Error(`Track3 Database remote report failed with status ${status.status}.`);
+    if (status === 8 || status === 16) {
+      throw new Error(`Track3 Database remote report failed with status ${statusPayload.status}.`);
     }
     if (attempt > 0 && attempt % 12 === 0) {
       console.warn(`Track3 Database remote report still processing (${Math.round((attempt * 5) / 60)}m).`);
@@ -207,6 +228,8 @@ export async function execReport(
       header: t.header ?? [],
       rows: t.rows ?? 0,
       index,
+      // Prefer human label (e.g. "Motrex - Tororo - Trips…") over type name ("unit_group_rides").
+      name: String(t.label || t.name || t.n || `table_${index}`).trim(),
     })),
   };
 }
@@ -308,7 +331,7 @@ export async function fetchUnitGroupUnitIds(sid: string, groupId: number): Promi
       spec: {
         itemsType: "avl_unit",
         propName: "sys_name",
-        propValueMask: "*",
+        propValueMask: "Motrex*",
         sortType: "sys_name",
       },
       force: 1,
@@ -319,7 +342,6 @@ export async function fetchUnitGroupUnitIds(sid: string, groupId: number): Promi
     sid,
   ).catch(() => null);
   const motrexUnitIds = (unitSearch?.items ?? [])
-    .filter((item) => /^Motrex\s*-/i.test(String(item.nm ?? "")))
     .map((item) => Number(item.id))
     .filter((id) => Number.isFinite(id) && id > 0);
   if (motrexUnitIds.length) {
@@ -369,6 +391,65 @@ export function rowsFromRaw(
     }
     return out;
   });
+}
+
+function findZonesVisitTable(tables: ReportTableMeta[]): ReportTableMeta | null {
+  for (const table of tables) {
+    const headerText = table.header.join(" ").toLowerCase();
+    if (headerText.includes("geofence") && headerText.includes("time in")) return table;
+  }
+  return tables.find((t) => t.rows > 0) ?? null;
+}
+
+/** Fetch detalized geofence visit rows (one subrow per visit, keyed by parent vehicle). */
+export async function fetchDetalizedZonesVisitRows(
+  sid: string,
+  tables: ReportTableMeta[],
+): Promise<Record<string, string>[]> {
+  const table = findZonesVisitTable(tables);
+  if (!table || table.rows <= 0) return [];
+
+  const headers = table.header;
+  const groupingIdx = pickAny(headers, [/grouping/i, /vehicle|unit|name/i]);
+  const parentRows = await fetchTableRowsRaw(sid, table.index, table.rows);
+  const visits: Record<string, string>[] = [];
+
+  for (let rowIndex = 0; rowIndex < parentRows.length; rowIndex += 1) {
+    const parentCells = parentRows[rowIndex].c ?? [];
+    const vehicle = cellText(parentCells[groupingIdx >= 0 ? groupingIdx : 0]);
+    if (!vehicle) continue;
+
+    const subRows = await fetchTableSubrowsForParent(sid, table.index, rowIndex);
+    if (subRows.length) {
+      for (const sub of subRows) {
+        const cells = sub.c ?? [];
+        const geoIdx = cells.length >= 5 ? 1 : 0;
+        const timeInIdx = geoIdx + 1;
+        const timeOutIdx = geoIdx + 2;
+        const durationIdx = geoIdx + 3;
+        visits.push({
+          Grouping: vehicle,
+          Vehicle: vehicle,
+          Geofence: cellText(cells[geoIdx]),
+          "Time in": cellText(cells[timeInIdx]),
+          "Time out": cellText(cells[timeOutIdx]),
+          "Duration in": cellText(cells[durationIdx]),
+        });
+      }
+      continue;
+    }
+
+    visits.push({
+      Grouping: vehicle,
+      Vehicle: vehicle,
+      Geofence: cellText(parentCells[pickAny(headers, [/geofence|zone/i])]),
+      "Time in": cellText(parentCells[pickAny(headers, [/time\s*in|beginning/i])]),
+      "Time out": cellText(parentCells[pickAny(headers, [/time\s*out|end/i])]),
+      "Duration in": cellText(parentCells[pickAny(headers, [/duration/i])]),
+    });
+  }
+
+  return visits;
 }
 
 export async function fetchPrimaryTable(
