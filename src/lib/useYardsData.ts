@@ -11,6 +11,27 @@ type YardsApiPayload = YardsLiveDataset & {
   syncPending?: boolean;
 };
 
+type YardsSyncStep = {
+  ok: boolean;
+  isLast?: boolean;
+  nextIndex?: number | null;
+  vehicleIndex?: number;
+  vehicleCount?: number;
+  rowCount?: number;
+  error?: string;
+};
+
+const STEP_DELAY_MS = 1500;
+const RETRY_DELAYS_MS = [30_000, 60_000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function isRateLimitError(message: string): boolean {
+  return /1004|LIMIT msgs_activity|rate limit|fetch failed/i.test(message);
+}
+
 async function fetchYardsFromDb(): Promise<YardsApiPayload> {
   const res = await fetch("/api/yards", { cache: "no-store" });
   if (!res.ok) {
@@ -20,50 +41,106 @@ async function fetchYardsFromDb(): Promise<YardsApiPayload> {
   return res.json() as Promise<YardsApiPayload>;
 }
 
-async function triggerYardsSync(opts: { resume?: boolean; refresh?: boolean } = {}): Promise<void> {
-  const qs = new URLSearchParams({ insideIndex: "0" });
-  if (opts.resume) qs.set("resume", "1");
+async function runYardsSyncStep(insideIndex: number, opts: { refresh?: boolean } = {}): Promise<YardsSyncStep> {
+  const qs = new URLSearchParams({ insideIndex: String(insideIndex), ui: "1" });
   if (opts.refresh) qs.set("refresh", "1");
   const res = await fetch(`/api/yards/sync?${qs.toString()}`, { method: "POST", cache: "no-store" });
-  if (!res.ok) {
-    const payload = (await res.json().catch(() => ({}))) as { error?: string };
+  const payload = (await res.json().catch(() => ({}))) as YardsSyncStep & { error?: string };
+  if (!res.ok || !payload.ok) {
     throw new Error(payload.error ?? `Sync failed (${res.status})`);
   }
+  return payload;
+}
+
+async function runYardsSyncStepWithRetry(
+  insideIndex: number,
+  opts: { refresh?: boolean } = {},
+): Promise<YardsSyncStep> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await runYardsSyncStep(insideIndex, opts);
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isRateLimitError(msg) || attempt >= RETRY_DELAYS_MS.length) throw err;
+      await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+  }
+  throw lastErr;
 }
 
 export function useYardsData(initialData: YardsLiveDataset | null = null) {
   const [data, setData] = useState<YardsApiPayload | null>(initialData);
   const [loading, setLoading] = useState(!initialData);
   const [syncing, setSyncing] = useState(false);
+  const [syncLabel, setSyncLabel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const bootstrapAttemptedRef = useRef(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const syncLoopRef = useRef<Promise<void> | null>(null);
+  const cancelSyncRef = useRef(false);
 
-  const stopPolling = useCallback(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
+  const refreshDb = useCallback(async () => {
+    const payload = await fetchYardsFromDb();
+    setData(payload);
+    setNowMs(Date.now());
+    return payload;
   }, []);
 
-  const startPolling = useCallback(() => {
-    if (pollRef.current) return;
-    pollRef.current = setInterval(async () => {
-      try {
-        const payload = await fetchYardsFromDb();
-        setData(payload);
-        setNowMs(Date.now());
-        if (payload.syncProgress === "complete" || (!payload.syncPending && !payload.syncInProgress)) {
-          stopPolling();
+  const runFullYardsSync = useCallback(
+    async (opts: { resume?: boolean; refresh?: boolean } = {}) => {
+      if (syncLoopRef.current) return syncLoopRef.current;
+
+      cancelSyncRef.current = false;
+      setSyncing(true);
+      setError(null);
+
+      const loop = (async () => {
+        let nextIndex: number | null = 0;
+        let isFirst = true;
+
+        try {
+          while (nextIndex != null && !cancelSyncRef.current) {
+            const step = await runYardsSyncStepWithRetry(nextIndex, {
+              refresh: isFirst && Boolean(opts.refresh),
+            });
+
+            const vehicleIndex = Number(step.vehicleIndex ?? nextIndex);
+            const vehicleCount = Number(step.vehicleCount ?? 0);
+            if (vehicleCount > 0) {
+              setSyncLabel(`Syncing vehicle ${vehicleIndex + 1}/${vehicleCount}…`);
+            }
+
+            await refreshDb();
+
+            if (step.isLast || step.nextIndex == null) break;
+
+            nextIndex = step.nextIndex;
+            isFirst = false;
+            await sleep(STEP_DELAY_MS);
+          }
+        } catch (err) {
+          if (!cancelSyncRef.current) {
+            setError(err instanceof Error ? err.message : "Failed to sync yards data.");
+          }
+        } finally {
+          setSyncLabel(null);
           setSyncing(false);
+          syncLoopRef.current = null;
+          try {
+            await refreshDb();
+          } catch {
+            // ignore final refresh errors
+          }
         }
-      } catch {
-        // Keep polling while chain runs.
-      }
-    }, 10_000);
-  }, [stopPolling]);
+      })();
+
+      syncLoopRef.current = loop;
+      return loop;
+    },
+    [refreshDb],
+  );
 
   const reloadFromDb = useCallback(() => {
     setNowMs(Date.now());
@@ -75,26 +152,21 @@ export function useYardsData(initialData: YardsLiveDataset | null = null) {
   const refresh = reloadFromDb;
 
   const syncFromTrack3 = useCallback(async () => {
-    setSyncing(true);
-    setError(null);
-    stopPolling();
-    try {
-      const current = data ?? (await fetchYardsFromDb());
-      const resume = Boolean(current.syncInProgress);
-      await triggerYardsSync({ resume, refresh: !resume });
-      startPolling();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to sync yards data.");
-      setSyncing(false);
-    }
-  }, [data, stopPolling, startPolling]);
+    const current = data ?? (await refreshDb());
+    const resume = Boolean(current.syncInProgress);
+    await runFullYardsSync({ resume, refresh: !resume });
+  }, [data, refreshDb, runFullYardsSync]);
 
   useEffect(() => {
     const interval = setInterval(() => setNowMs(Date.now()), 30_000);
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => () => stopPolling(), [stopPolling]);
+  useEffect(() => {
+    return () => {
+      cancelSyncRef.current = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (initialData && refreshNonce === 0) return;
@@ -102,38 +174,11 @@ export function useYardsData(initialData: YardsLiveDataset | null = null) {
     let cancelled = false;
 
     fetchYardsFromDb()
-      .then(async (payload) => {
+      .then((payload) => {
         if (cancelled) return;
-
-        // Always paint DB data immediately (including last-good prior day).
         setData(payload);
         setLoading(false);
         setNowMs(Date.now());
-
-        if (payload.syncInProgress) {
-          setSyncing(true);
-          startPolling();
-        }
-
-        const hasUsableData = (payload.insideRows?.length ?? 0) > 0 || (payload.rows?.length ?? 0) > 0;
-        // Only auto-bootstrap when there is nothing to show — never wipe a populated last-good view.
-        const shouldBootstrap =
-          payload.syncPending && !hasUsableData && !bootstrapAttemptedRef.current && !payload.syncInProgress;
-
-        if (shouldBootstrap) {
-          bootstrapAttemptedRef.current = true;
-          setSyncing(true);
-          try {
-            await triggerYardsSync({ refresh: true });
-            if (cancelled) return;
-            startPolling();
-          } catch (syncErr) {
-            if (!cancelled) {
-              console.error("[useYardsData] bootstrap sync failed:", syncErr);
-              setSyncing(false);
-            }
-          }
-        }
       })
       .catch((err) => {
         if (!cancelled) {
@@ -145,17 +190,19 @@ export function useYardsData(initialData: YardsLiveDataset | null = null) {
     return () => {
       cancelled = true;
     };
-  }, [refreshNonce, initialData, startPolling]);
+  }, [refreshNonce, initialData]);
 
   return {
     data,
     loading: loading && !data,
     syncing,
+    syncLabel,
     error,
     refresh,
     reloadFromDb,
     syncFromTrack3,
     nowMs,
     lastExecutionTime: data?.lastExecutionTime ?? "—",
+    lastUpdatedAt: data?.lastUpdatedAt ?? data?.lastExecutionTime ?? null,
   };
 }

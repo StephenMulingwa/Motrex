@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { currentWeekEatRangeThroughYesterday } from "@/lib/dateRange";
+import { currentCalendarWeekSyncBounds } from "@/lib/dateRange";
 import { cronRunFinish, cronRunStart, ensureSchema } from "@/lib/reportStore";
 import { triggerNextTripsSummarySync } from "@/lib/tripsSummarySyncChain";
 
-/** Vercel cron: daily 04:00 UTC = 07:00 EAT — refresh current calendar week (through yesterday). */
+/** Vercel cron: 01:00 UTC daily = 04:00 EAT — refresh current calendar week through yesterday. */
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
@@ -20,15 +20,21 @@ export async function GET(request: Request) {
   }
 
   const runId = await cronRunStart("daily-trips-summary");
-  const { from, to } = currentWeekEatRangeThroughYesterday();
-  const details: Record<string, unknown> = { from, to, reportType: "trips_summary" };
+  const { weekStart, weekEnd, syncEnd } = currentCalendarWeekSyncBounds();
+  const details: Record<string, unknown> = {
+    weekStart,
+    weekEnd,
+    syncEnd,
+    reportType: "trips_summary",
+  };
   let ok = true;
 
   try {
     await ensureSchema();
     triggerNextTripsSummarySync({
-      weekStart: from,
-      weekEnd: to,
+      weekStart,
+      weekEnd,
+      syncEnd,
       batchIndex: 0,
     });
     details.message = "Trips summary current-week batch chain started";

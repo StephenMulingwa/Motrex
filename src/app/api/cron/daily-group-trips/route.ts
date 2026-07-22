@@ -1,13 +1,9 @@
 import { NextResponse } from "next/server";
-import { yesterdayEatDateString } from "@/lib/dateRange";
-import {
-  cronRunFinish,
-  cronRunStart,
-  ensureSchema,
-  upsertReportSnapshot,
-} from "@/lib/reportStore";
-import { executeStoredReport, withWialonRetry } from "@/lib/wialon/reports";
+import { rollingTripsSyncRange } from "@/lib/dateRange";
+import { cronRunFinish, cronRunStart, ensureSchema } from "@/lib/reportStore";
+import { triggerNextTripsUnitSync } from "@/lib/tripsSyncChain";
 
+/** Vercel cron: 02:00 UTC daily = 05:00 EAT — rolling 14-day Group Trips refresh. */
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
@@ -23,26 +19,24 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const runId = await cronRunStart("daily-reports");
-  const dateStr = yesterdayEatDateString();
-  const details: Record<string, unknown> = { date: dateStr, results: [] as unknown[] };
+  const runId = await cronRunStart("daily-group-trips");
+  const { from, to } = rollingTripsSyncRange();
+  const details: Record<string, unknown> = {
+    intervalStart: from,
+    intervalEnd: to,
+    reportType: "trips",
+    mode: "per_unit_chain",
+  };
   let ok = true;
 
   try {
     await ensureSchema();
-    const results: unknown[] = [];
-
-    const yards = await withWialonRetry(`${dateStr} / yards`, () =>
-      executeStoredReport("yards", dateStr),
-    );
-    await upsertReportSnapshot(yards);
-    results.push({
-      reportType: yards.reportType,
-      rowCount: yards.payload.rows?.length ?? 0,
-      meta: yards.rawMeta,
+    triggerNextTripsUnitSync({
+      unitIndex: 0,
+      intervalStart: from,
+      intervalEnd: to,
     });
-
-    details.results = results;
+    details.message = "Group Trips rolling 14-day unit chain started";
   } catch (error) {
     ok = false;
     details.error = error instanceof Error ? error.message : String(error);

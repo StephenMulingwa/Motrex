@@ -121,10 +121,7 @@ export function getYardsDefaultRange(): { from: string; to: string } {
 }
 
 export function getTripsDefaultRange(): { from: string; to: string } {
-  return {
-    from: "2026-06-15",
-    to: "2026-06-30",
-  };
+  return getCurrentMonthEatRange();
 }
 
 export function getUtilizationDefaultRange(): { from: string; to: string } {
@@ -237,14 +234,36 @@ export function enumerateWeeksInRange(from: string, to: string): Array<{ from: s
 
 /** Current UI calendar week (Week 1–5) clipped through yesterday (EAT). */
 export function currentWeekEatRangeThroughYesterday(): { from: string; to: string } {
-  const to = yesterdayEatDateString();
-  const month = to.slice(0, 7);
-  const day = Number(to.slice(8, 10));
+  const { weekStart, syncEnd } = currentCalendarWeekSyncBounds();
+  return { from: weekStart, to: syncEnd };
+}
+
+/**
+ * Calendar week bounds for DB keys (full Week 1–5 grid) plus syncEnd (yesterday, capped in week).
+ * Wialon fetches weekStart→syncEnd; DB stores under weekStart→weekEnd (full calendar week).
+ */
+export function currentCalendarWeekSyncBounds(): {
+  weekStart: string;
+  weekEnd: string;
+  syncEnd: string;
+} {
+  const syncEnd = yesterdayEatDateString();
+  const month = syncEnd.slice(0, 7);
+  const day = Number(syncEnd.slice(8, 10));
   const weekNum = Math.min(5, Math.max(1, Math.ceil(day / 7)));
   const bounds = weekBounds(month, String(weekNum));
   return {
-    from: bounds.from,
-    to: bounds.to > to ? to : bounds.to,
+    weekStart: bounds.from,
+    weekEnd: bounds.to,
+    syncEnd: bounds.to > syncEnd ? syncEnd : bounds.to,
+  };
+}
+
+/** Rolling Group Trips cron window: last 14 days through yesterday (EAT). */
+export function rollingTripsSyncRange(): { from: string; to: string } {
+  return {
+    from: fourteenDaysAgoEatDateString(),
+    to: yesterdayEatDateString(),
   };
 }
 

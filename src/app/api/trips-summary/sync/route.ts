@@ -20,10 +20,12 @@ function parseParams(request: Request): {
   from?: string;
   to?: string;
   weekIndex: number;
+  syncEnd?: string;
 } {
   const url = new URL(request.url);
   const from = url.searchParams.get("from") ?? undefined;
   const to = url.searchParams.get("to") ?? undefined;
+  const syncEnd = url.searchParams.get("syncEnd") ?? undefined;
   const weekIndexRaw = url.searchParams.get("weekIndex");
   const weekIndex = weekIndexRaw == null ? 0 : Number(weekIndexRaw);
   const batchIndexRaw = url.searchParams.get("batchIndex");
@@ -51,7 +53,7 @@ function parseParams(request: Request): {
     throw new Error("weekIndex must be a non-negative integer.");
   }
 
-  return { weekStart, weekEnd, batchIndex, from, to, weekIndex };
+  return { weekStart, weekEnd, batchIndex, from, to, weekIndex, syncEnd };
 }
 
 export async function POST(request: Request) {
@@ -79,6 +81,7 @@ export async function POST(request: Request) {
         from: params.from,
         to: params.to,
         weekIndex: params.weekIndex,
+        syncEnd: params.syncEnd,
       });
     } else if (!result.isLastWeek && params.from && params.to) {
       triggerNextTripsSummarySync({
@@ -88,6 +91,7 @@ export async function POST(request: Request) {
         from: params.from,
         to: params.to,
         weekIndex: params.weekIndex + 1,
+        syncEnd: params.syncEnd,
       });
     }
 

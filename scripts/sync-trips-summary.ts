@@ -61,11 +61,14 @@ function parseArgs(): Array<{ from: string; to: string }> {
 }
 
 async function syncWeek(from: string, to: string): Promise<void> {
-  console.log(`[trips-summary:sync] week ${from} → ${to}`);
+  const yesterday = yesterdayEatDateString();
+  const syncEnd = to > yesterday ? yesterday : to;
+  console.log(`[trips-summary:sync] week ${from} → ${to}${syncEnd < to ? ` (fetch through ${syncEnd})` : ""}`);
   let batchIndex = 0;
   let result = await syncTripsSummaryBatch({
     weekStart: from,
     weekEnd: to,
+    syncEnd: syncEnd < to ? syncEnd : undefined,
     batchIndex: 0,
     authorized: true,
   });
@@ -79,6 +82,7 @@ async function syncWeek(from: string, to: string): Promise<void> {
     result = await syncTripsSummaryBatch({
       weekStart: from,
       weekEnd: to,
+      syncEnd: syncEnd < to ? syncEnd : undefined,
       batchIndex,
       authorized: true,
     });

@@ -476,7 +476,8 @@ async function executeTripsForBounds({
       intervalStart,
       intervalEnd,
       unitIds,
-      clearBeforeSync: false,
+      clearBeforeSync: idx === startUnitIndex && startUnitIndex === 0,
+      clearMode: "exact",
     });
     totalRaw += result.rawRowCount;
     totalStored += result.storedRowCount;

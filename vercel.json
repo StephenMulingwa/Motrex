@@ -3,24 +3,8 @@
   "framework": "nextjs",
   "crons": [
     {
-      "path": "/api/cron/daily-reports",
+      "path": "/api/cron/daily-pipeline",
       "schedule": "0 21 * * *"
-    },
-    {
-      "path": "/api/cron/daily-yards",
-      "schedule": "0 4 * * *"
-    },
-    {
-      "path": "/api/cron/daily-utilization",
-      "schedule": "0 0 * * *"
-    },
-    {
-      "path": "/api/cron/daily-eco",
-      "schedule": "0 0 * * *"
-    },
-    {
-      "path": "/api/cron/daily-trips-summary",
-      "schedule": "0 4 * * *"
     }
   ]
 }

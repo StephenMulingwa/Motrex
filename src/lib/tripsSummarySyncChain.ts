@@ -12,6 +12,7 @@ export function tripsSummarySyncUrl(params: {
   from?: string;
   to?: string;
   weekIndex?: number;
+  syncEnd?: string;
 }): string {
   const qs = new URLSearchParams({
     weekStart: params.weekStart,
@@ -21,6 +22,7 @@ export function tripsSummarySyncUrl(params: {
   if (params.from) qs.set("from", params.from);
   if (params.to) qs.set("to", params.to);
   if (params.weekIndex != null) qs.set("weekIndex", String(params.weekIndex));
+  if (params.syncEnd) qs.set("syncEnd", params.syncEnd);
   return `${syncBaseUrl()}/api/trips-summary/sync?${qs.toString()}`;
 }
 
@@ -32,6 +34,7 @@ export function triggerNextTripsSummarySync(params: {
   from?: string;
   to?: string;
   weekIndex?: number;
+  syncEnd?: string;
 }): void {
   const secret = process.env.CRON_SECRET?.trim();
   if (!secret) {

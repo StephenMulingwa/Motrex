@@ -51,8 +51,10 @@ export default function AppShell({ onLogout, initialLiveData = null }: AppShellP
     reloadFromDb: yardsReloadFromDb,
     syncFromTrack3: yardsSyncFromTrack3,
     syncing: yardsSyncing,
+    syncLabel: yardsSyncLabel,
     nowMs: yardsNowMs,
     lastExecutionTime: yardsLastExecutionTime,
+    lastUpdatedAt: yardsLastUpdatedAt,
   } = useYardsData();
   const isMobileNav = useMediaQuery(LAYOUT_NARROW_QUERY);
 
@@ -570,11 +572,13 @@ export default function AppShell({ onLogout, initialLiveData = null }: AppShellP
               data={yardsData}
               loading={yardsLoading}
               syncing={yardsSyncing}
+              syncLabel={yardsSyncLabel}
               error={yardsError}
               onRefresh={yardsReloadFromDb}
               onSyncFromTrack3={yardsSyncFromTrack3}
               nowMs={yardsNowMs}
               lastExecutionTime={yardsLastExecutionTime}
+              lastUpdatedAt={yardsLastUpdatedAt}
             />
           </div>
           <div style={panelStyle("reports")}>

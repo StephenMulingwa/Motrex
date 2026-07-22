@@ -23,7 +23,11 @@ export const YARDS_TEMPLATE_GEOFENCES = MOTREX_GEOFENCES.filter((g) => TEMPLATE_
 
 export const YARDS_ZONE_COUNT = YARDS_TEMPLATE_GEOFENCES.length;
 
-export const SELECTED_GEOFENCE_NAMES = YARDS_TEMPLATE_GEOFENCES.map((g) => g.name);
+/** All Motrex selected geofences shown in Live Monitor / Yards discovery (includes Athi River). */
+export const SELECTED_GEOFENCE_NAMES = MOTREX_GEOFENCES.map((g) => g.name);
+
+/** Template-58 yard zone names only (visit-history enrichment). */
+export const YARDS_TEMPLATE_GEOFENCE_NAMES = YARDS_TEMPLATE_GEOFENCES.map((g) => g.name);
 
 function normalizeGeofenceName(name: string): string {
   return name.trim().replace(/\s+/g, " ").toLowerCase();
@@ -31,6 +35,10 @@ function normalizeGeofenceName(name: string): string {
 
 const YARDS_GEOFENCE_LOOKUP = new Map(
   YARDS_TEMPLATE_GEOFENCES.map((g) => [normalizeGeofenceName(g.name), g.name]),
+);
+
+const MOTREX_GEOFENCE_LOOKUP = new Map(
+  MOTREX_GEOFENCES.map((g) => [normalizeGeofenceName(g.name), g.name]),
 );
 
 const GEOFENCE_TEXT_ALIASES: { pattern: RegExp; name: string }[] = [
@@ -93,7 +101,7 @@ export function findGeofenceFromText(location: string): string | null {
   return null;
 }
 
-/** Map a Wialon geofence label to a selected geofence name, or null. */
+/** Map a Wialon geofence label to a template-58 yard zone name, or null. */
 export function matchSelectedGeofence(wialonName: string): string | null {
   const text = String(wialonName ?? "").trim();
   if (!text || text === "—") return null;
@@ -104,6 +112,19 @@ export function matchSelectedGeofence(wialonName: string): string | null {
   const fuzzy = findGeofenceFromText(text);
   if (!fuzzy) return null;
   return YARDS_GEOFENCE_LOOKUP.has(normalizeGeofenceName(fuzzy)) ? fuzzy : null;
+}
+
+/** Map a label to any Motrex selected geofence (Live Monitor / Yards discovery set). */
+export function matchMotrexGeofence(wialonName: string): string | null {
+  const text = String(wialonName ?? "").trim();
+  if (!text || text === "—") return null;
+
+  const exact = MOTREX_GEOFENCE_LOOKUP.get(normalizeGeofenceName(text));
+  if (exact) return exact;
+
+  const fuzzy = findGeofenceFromText(text);
+  if (!fuzzy) return null;
+  return MOTREX_GEOFENCE_LOOKUP.has(normalizeGeofenceName(fuzzy)) ? fuzzy : null;
 }
 
 export function resolveGeofence(

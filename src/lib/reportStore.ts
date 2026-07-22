@@ -40,6 +40,8 @@ export interface StoredReportResponse {
   pivot: Record<string, Record<string, number>>;
   columns: string[];
   snapshots: Array<{ reportDate: string; rowCount: number; meta: Record<string, unknown> | null }>;
+  /** Formatted EAT timestamp of the newest row in the selected range. */
+  lastUpdatedAt?: string | null;
   syncProgress?: "in_progress" | "complete";
   syncInProgress?: boolean;
 }
@@ -381,11 +383,15 @@ export async function syncGroupTripsUnitToDb(
     intervalStart: string;
     intervalEnd: string;
     clearBeforeSync?: boolean;
+    /** overlap = rolling cron window; exact = single interval bucket only */
+    clearMode?: "overlap" | "exact";
     unitIds?: number[];
+    retryDelaysMs?: number[];
   },
 ): Promise<GroupTripsUnitSyncResult> {
   await ensureSchema();
   const { intervalStart, intervalEnd, clearBeforeSync = false } = options;
+  const clearMode = options.clearMode ?? "overlap";
   const { dayBoundsUnix } = await import("./dateRange");
   const { buildMotrexTripTables } = await import("./motrexTrips");
   const {
@@ -396,7 +402,11 @@ export async function syncGroupTripsUnitToDb(
   const { MOTREX_GROUP_ID, TEMPLATES } = await import("./motrexConfig");
 
   if (clearBeforeSync && unitIndex === 0) {
-    await dbDeleteTripsForInterval(intervalStart, intervalEnd);
+    if (clearMode === "exact") {
+      await dbDeleteTripsForInterval(intervalStart, intervalEnd);
+    } else {
+      await clearTripsOverlappingRange(intervalStart, intervalEnd);
+    }
   }
 
   let unitIds = options.unitIds;
@@ -433,7 +443,7 @@ export async function syncGroupTripsUnitToDb(
         await wialonLogout(sid).catch(() => undefined);
       }
     },
-    [45_000, 90_000, 150_000],
+    options.retryDelaysMs ?? [45_000, 90_000, 150_000],
   );
 
   const tripRows = buildMotrexTripTables(result.rows, intervalEnd);
@@ -470,6 +480,17 @@ async function dbDeleteTripsForInterval(weekStart: string, weekEnd: string): Pro
   await db
     .delete(motrexTrips)
     .where(and(eq(motrexTrips.weekStart, weekStart), eq(motrexTrips.weekEnd, weekEnd)));
+}
+
+/** Remove trip rows whose stored interval overlaps [intervalStart, intervalEnd] (rolling sync). */
+export async function clearTripsOverlappingRange(intervalStart: string, intervalEnd: string): Promise<void> {
+  await ensureSchema();
+  const db = getDb();
+  await db.execute(sql`
+    DELETE FROM motrex_trips
+    WHERE week_start <= ${intervalEnd}::date
+      AND week_end >= ${intervalStart}::date
+  `);
 }
 
 /** @deprecated Prefer clearYardsForDate / clearYardsBeforeDate so UI can serve last-good rows. */
@@ -559,17 +580,25 @@ async function insertYardsInsideRow(
 function loadInsideUnitsFromMeta(rawMeta: Record<string, unknown> | null | undefined): YardsInsideUnit[] {
   const units = rawMeta?.insideUnits;
   if (!Array.isArray(units)) return [];
-  return units
-    .map((u) => {
-      const row = u as Record<string, unknown>;
-      const unitId = Number(row.unitId);
-      const geofence = String(row.geofence ?? "").trim();
-      const vehicle = String(row.vehicle ?? "").trim();
-      const registration = String(row.registration ?? registrationLabel(vehicle)).trim();
-      if (!Number.isFinite(unitId) || unitId <= 0 || !geofence) return null;
-      return { unitId, vehicle, registration, geofence };
-    })
-    .filter((u): u is YardsInsideUnit => u != null);
+  const parsed: YardsInsideUnit[] = [];
+  for (const u of units) {
+    const row = u as Record<string, unknown>;
+    const unitId = Number(row.unitId ?? 0);
+    const geofence = String(row.geofence ?? "").trim();
+    const vehicle = String(row.vehicle ?? "").trim();
+    const registration = String(row.registration ?? registrationLabel(vehicle)).trim();
+    if (!geofence || !registration) continue;
+    if (!Number.isFinite(unitId) || unitId < 0) continue;
+    const timeInHint = String(row.timeInHint ?? "").trim();
+    parsed.push({
+      unitId,
+      vehicle,
+      registration,
+      geofence,
+      ...(timeInHint ? { timeInHint } : {}),
+    });
+  }
+  return parsed;
 }
 
 async function upsertYardsSnapshotOnly(
@@ -682,6 +711,7 @@ async function finalizeYardsSync(
 
 export interface YardsSyncOptions {
   clearBeforeSync?: boolean;
+  retryDelaysMs?: number[];
 }
 
 /** Resolve sync start index for UI vs cron (avoid wiping mid-chain). clearBeforeSync only clears today's date. */
@@ -793,18 +823,42 @@ export async function syncYardsInsideToDb(
   }
 
   const current = insideUnits[insideIndex];
-  const fetched = await fetchYardsLiveForUnitId(current.unitId);
-  const insideSummary = computeInsideSummaryFromVisits(fetched.rows, current.geofence, current, {
-    endMs: now.getTime(),
-    lastExecutionTime,
-  });
-
   let vehicleRowCount = 0;
-  if (insideSummary) {
-    vehicleRowCount = await insertYardsInsideRow(reportDate, insideSummary, now);
-  } else {
+
+  if (current.unitId > 0) {
+    const fetched = await fetchYardsLiveForUnitId(current.unitId, options.retryDelaysMs);
+    const insideSummary = computeInsideSummaryFromVisits(fetched.rows, current.geofence, current, {
+      endMs: now.getTime(),
+      lastExecutionTime,
+    });
+    if (insideSummary) {
+      vehicleRowCount = await insertYardsInsideRow(reportDate, insideSummary, now);
+    }
+  }
+
+  if (!vehicleRowCount) {
+    // No template-58 open visit (e.g. Athi River) or unresolved unit ID — store live Inside row.
+    const timeIn = current.timeInHint?.trim() || lastExecutionTime;
+    const timeInMs = parseDateTimeMs(timeIn);
+    const endMs = now.getTime();
+    const durationDays =
+      timeInMs > 0 ? Math.max(0, (endMs - timeInMs) / 86400000) : 0;
+    vehicleRowCount = await insertYardsInsideRow(
+      reportDate,
+      {
+        registrationNumber: current.registration,
+        vehicle: registrationLabel(current.vehicle),
+        geofence: current.geofence,
+        timeIn,
+        lastExecutionTime,
+        duration: timeInMs > 0 ? formatTimeSince(timeInMs, endMs) : "—",
+        durationDays,
+        status: "Inside",
+      },
+      now,
+    );
     console.log(
-      `[yards:sync] skip unit ${current.unitId} (${current.registration}): template 58 has no open visit in ${current.geofence}`,
+      `[yards:sync] live-inside unit ${current.unitId || "n/a"} (${current.registration}) @ ${current.geofence}`,
     );
   }
 
@@ -1118,6 +1172,16 @@ export async function getYardsLiveStoredData(): Promise<StoredReportResponse & {
     : rowLastExec
       ? formatEatDateTime(rowLastExec)
       : "—";
+  const lastUpdatedAt = rows.length
+    ? formatEatDateTime(
+        rows.reduce((max, row) => {
+          const ts = row.updatedAt?.getTime() ?? 0;
+          return ts > max ? ts : max;
+        }, 0),
+      )
+    : lastExecutionTime !== "—"
+      ? lastExecutionTime
+      : null;
   const endMs = Date.now();
   const snapshotInside = snapshot?.payload.insideRows ?? [];
   const insideRows = rows.some((r) => r.status === "Inside")
@@ -1143,6 +1207,7 @@ export async function getYardsLiveStoredData(): Promise<StoredReportResponse & {
     syncProgress,
     syncInProgress: syncProgress === "in_progress",
     lastExecutionTime,
+    lastUpdatedAt,
   };
 }
 
@@ -1197,6 +1262,21 @@ export async function getStoredReportData(
 ): Promise<StoredReportResponse> {
   const db = getDb();
 
+  async function maxUpdatedAt(
+    table:
+      | typeof motrexTrips
+      | typeof motrexTripsSummary
+      | typeof motrexUtilization
+      | typeof motrexEcoDriving,
+    whereClause: ReturnType<typeof and>,
+  ): Promise<string | null> {
+    const [row] = await db
+      .select({ maxAt: sql<Date | null>`max(${table.updatedAt})` })
+      .from(table)
+      .where(whereClause);
+    return row?.maxAt ? formatEatDateTime(row.maxAt) : null;
+  }
+
   if (reportType === "yards") {
     const rows = await db
       .select()
@@ -1231,17 +1311,20 @@ export async function getStoredReportData(
   }
 
   if (reportType === "trips") {
+    const whereClause = and(gte(motrexTrips.weekEnd, fromDate), lte(motrexTrips.weekStart, toDate));
     const rows = await db
       .select()
       .from(motrexTrips)
-      .where(and(gte(motrexTrips.weekEnd, fromDate), lte(motrexTrips.weekStart, toDate)))
+      .where(whereClause)
       .orderBy(motrexTrips.weekStart);
+    const lastUpdatedAt = await maxUpdatedAt(motrexTrips, whereClause);
     if (rows.length) {
       return {
         reportType,
         from: fromDate,
         to: toDate,
         snapshotCount: new Set(rows.map((r) => `${r.weekStart}:${r.weekEnd}`)).size,
+        lastUpdatedAt,
         rows: rows.map((r) => ({
           ...(r.rawRow as Record<string, unknown>),
           Table: r.tripType,
@@ -1298,11 +1381,16 @@ export async function getStoredReportData(
   }
 
   if (reportType === "utilization") {
+    const whereClause = and(
+      gte(motrexUtilization.reportDate, fromDate),
+      lte(motrexUtilization.reportDate, toDate),
+    );
     const rows = await db
       .select()
       .from(motrexUtilization)
-      .where(and(gte(motrexUtilization.reportDate, fromDate), lte(motrexUtilization.reportDate, toDate)))
+      .where(whereClause)
       .orderBy(motrexUtilization.reportDate);
+    const lastUpdatedAt = await maxUpdatedAt(motrexUtilization, whereClause);
     if (rows.length) {
       const pivot: Record<string, Record<string, number>> = {};
       const columns = new Set<string>();
@@ -1315,6 +1403,7 @@ export async function getStoredReportData(
         from: fromDate,
         to: toDate,
         snapshotCount: new Set(rows.map((r) => String(r.reportDate))).size,
+        lastUpdatedAt,
         rows: rows.map((r) => ({ ...(r.rawRow as Record<string, unknown>), _reportDate: String(r.reportDate) })),
         pivot,
         columns: Array.from(columns).sort((a, b) => dayLabelSortValue(a) - dayLabelSortValue(b) || a.localeCompare(b)),
@@ -1328,6 +1417,10 @@ export async function getStoredReportData(
   }
 
   if (reportType === "eco_driving") {
+    const whereClause = and(
+      gte(motrexEcoDriving.reportDate, fromDate),
+      lte(motrexEcoDriving.reportDate, toDate),
+    );
     const rows = await db
       .select({
         reportDate: motrexEcoDriving.reportDate,
@@ -1336,8 +1429,9 @@ export async function getStoredReportData(
         count: motrexEcoDriving.count,
       })
       .from(motrexEcoDriving)
-      .where(and(gte(motrexEcoDriving.reportDate, fromDate), lte(motrexEcoDriving.reportDate, toDate)))
+      .where(whereClause)
       .orderBy(motrexEcoDriving.reportDate);
+    const lastUpdatedAt = await maxUpdatedAt(motrexEcoDriving, whereClause);
     if (rows.length) {
       const pivot: Record<string, Record<string, number>> = {};
       const columns = new Set<string>();
@@ -1355,6 +1449,7 @@ export async function getStoredReportData(
         to: toDate,
         snapshotCount: dailyCounts.size,
         totalRows: rows.length,
+        lastUpdatedAt,
         rows: [],
         pivot,
         columns: Array.from(columns).sort(),
@@ -1406,6 +1501,81 @@ export async function cronRunStart(jobName: string): Promise<number> {
     .values({ jobName, ok: null })
     .returning({ id: cronRuns.id });
   return row?.id ?? 0;
+}
+
+export interface DailyPipelineRunState {
+  id: number;
+  finishedAt: Date | null;
+  ok: boolean | null;
+  detail: Record<string, unknown>;
+}
+
+export async function getCronRunState(runId: number): Promise<DailyPipelineRunState | null> {
+  const db = getDb();
+  const [row] = await db
+    .select({
+      id: cronRuns.id,
+      finishedAt: cronRuns.finishedAt,
+      ok: cronRuns.ok,
+      detail: cronRuns.detail,
+    })
+    .from(cronRuns)
+    .where(eq(cronRuns.id, runId))
+    .limit(1);
+  if (!row) return null;
+  return {
+    id: row.id,
+    finishedAt: row.finishedAt,
+    ok: row.ok,
+    detail: row.detail ?? {},
+  };
+}
+
+export async function findDailyPipelineRun(
+  pipelineDate: string,
+): Promise<DailyPipelineRunState | null> {
+  const db = getDb();
+  const rows = await db
+    .select({
+      id: cronRuns.id,
+      finishedAt: cronRuns.finishedAt,
+      ok: cronRuns.ok,
+      detail: cronRuns.detail,
+    })
+    .from(cronRuns)
+    .where(eq(cronRuns.jobName, "daily-pipeline"))
+    .orderBy(desc(cronRuns.startedAt))
+    .limit(20);
+
+  const row = rows.find(
+    (candidate) => String(candidate.detail?.pipelineDate ?? "") === pipelineDate,
+  );
+  if (!row) return null;
+  return {
+    id: row.id,
+    finishedAt: row.finishedAt,
+    ok: row.ok,
+    detail: row.detail ?? {},
+  };
+}
+
+export async function cronRunProgress(
+  runId: number,
+  detailPatch: Record<string, unknown>,
+): Promise<void> {
+  const current = await getCronRunState(runId);
+  if (!current || current.finishedAt) return;
+  const db = getDb();
+  await db
+    .update(cronRuns)
+    .set({
+      detail: {
+        ...current.detail,
+        ...detailPatch,
+        lastHeartbeatAt: new Date().toISOString(),
+      },
+    })
+    .where(eq(cronRuns.id, runId));
 }
 
 export async function cronRunFinish(
@@ -1653,14 +1823,22 @@ export async function getTripsSummaryStoredData(fromDate: string, toDate: string
     };
   });
 
-  const sync = await loadTripsSummarySyncStatus(fromDate, toDate);
   const weekKeys = new Set(rows.map((r) => `${r.weekStart}:${r.weekEnd}`));
+  const lastUpdatedAt = rows.length
+    ? formatEatDateTime(
+        rows.reduce((max, row) => {
+          const ts = row.updatedAt?.getTime() ?? 0;
+          return ts > max ? ts : max;
+        }, 0),
+      )
+    : null;
 
   return {
     reportType: "trips_summary",
     from: fromDate,
     to: toDate,
     snapshotCount: weekKeys.size,
+    lastUpdatedAt,
     rows: summaryRows,
     pivot: {},
     columns: summaryColumns,
@@ -1672,7 +1850,6 @@ export async function getTripsSummaryStoredData(fromDate: string, toDate: string
         meta: { source: "motrex_trips_summary", week: key },
       };
     }),
-    ...sync,
   };
 }
 
@@ -1684,6 +1861,8 @@ export async function syncTripsSummaryBatch(params: {
   to?: string;
   weekIndex?: number;
   authorized?: boolean;
+  /** Wialon fetch end (yesterday capped in week); defaults to weekEnd. */
+  syncEnd?: string;
 }): Promise<TripsSummarySyncResult> {
   await ensureSchema();
   const { weekStart, weekEnd, batchIndex } = params;
@@ -1691,39 +1870,51 @@ export async function syncTripsSummaryBatch(params: {
   const multiWeek = Boolean(params.from && params.to);
   const weeks = multiWeek ? enumerateWeeksInRange(params.from!, params.to!) : [{ from: weekStart, to: weekEnd }];
   const activeWeek = weeks[weekIndex] ?? weeks[0];
-  const activeWeekStart = activeWeek.from;
-  const activeWeekEnd = activeWeek.to;
+  const dbWeekStart = activeWeek.from;
+  const dbWeekEnd = activeWeek.to;
+  const fetchEnd = params.syncEnd ?? dbWeekEnd;
 
-  let meta = (await loadTripsSummarySyncMeta(activeWeekStart)) ?? {};
+  let meta = (await loadTripsSummarySyncMeta(dbWeekStart)) ?? {};
   let unitIds = Array.isArray(meta.unitIds) ? (meta.unitIds as number[]) : [];
   let batches = Array.isArray(meta.batches) ? (meta.batches as number[][]) : [];
 
   if (batchIndex === 0) {
+    const staleMs = 45 * 60 * 1000;
+    if (
+      meta.syncProgress === "in_progress" &&
+      meta.lastSyncAt &&
+      Date.now() - Date.parse(String(meta.lastSyncAt)) > staleMs
+    ) {
+      meta = {};
+    }
     if (multiWeek && weekIndex === 0) {
-      await saveTripsSummarySyncMeta(activeWeekStart, activeWeekEnd, {
+      await saveTripsSummarySyncMeta(dbWeekStart, dbWeekEnd, {
         syncProgress: "in_progress",
         rangeFrom: params.from,
         rangeTo: params.to,
         pendingWeeks: weeks,
         currentWeekIndex: 0,
         startedAt: new Date().toISOString(),
+        syncEnd: fetchEnd,
       });
     } else if (multiWeek) {
-      await saveTripsSummarySyncMeta(activeWeekStart, activeWeekEnd, {
+      await saveTripsSummarySyncMeta(dbWeekStart, dbWeekEnd, {
         syncProgress: "in_progress",
         rangeFrom: params.from,
         rangeTo: params.to,
         pendingWeeks: weeks,
         currentWeekIndex: weekIndex,
         startedAt: new Date().toISOString(),
+        syncEnd: fetchEnd,
       });
     }
-    await clearTripsSummaryWeek(activeWeekStart, activeWeekEnd);
+    await clearTripsSummaryWeek(dbWeekStart, dbWeekEnd);
     unitIds = await fetchMotrexUnitIds();
     batches = splitSummaryBatches(unitIds);
     meta = {
-      weekStart: activeWeekStart,
-      weekEnd: activeWeekEnd,
+      weekStart: dbWeekStart,
+      weekEnd: dbWeekEnd,
+      syncEnd: fetchEnd,
       unitIds,
       batches: batches.map((b) => b.length),
       batchCount: batches.length,
@@ -1735,7 +1926,7 @@ export async function syncTripsSummaryBatch(params: {
       pendingWeeks: multiWeek ? weeks : undefined,
       currentWeekIndex: weekIndex,
     };
-    await saveTripsSummarySyncMeta(activeWeekStart, activeWeekEnd, meta);
+    await saveTripsSummarySyncMeta(dbWeekStart, dbWeekEnd, meta);
   } else if (!batches.length) {
     unitIds = await fetchMotrexUnitIds();
     batches = splitSummaryBatches(unitIds);
@@ -1745,8 +1936,9 @@ export async function syncTripsSummaryBatch(params: {
       batches: batches.map((b) => b.length),
       batchCount: batches.length,
       syncProgress: "in_progress",
+      syncEnd: fetchEnd,
     };
-    await saveTripsSummarySyncMeta(activeWeekStart, activeWeekEnd, meta);
+    await saveTripsSummarySyncMeta(dbWeekStart, dbWeekEnd, meta);
   }
 
   const batchUnitIds = splitSummaryBatches(unitIds)[batchIndex];
@@ -1755,32 +1947,34 @@ export async function syncTripsSummaryBatch(params: {
   }
 
   const mappedRows = await executeTripsSummaryBatchWithFallback(
-    activeWeekStart,
-    activeWeekEnd,
+    dbWeekStart,
+    fetchEnd,
     batchUnitIds,
-    `${activeWeekStart} / trips_summary batch ${batchIndex + 1}/${batches.length}`,
+    `${dbWeekStart}–${fetchEnd} / trips_summary batch ${batchIndex + 1}/${batches.length}`,
   );
 
-  const upserted = await upsertTripsSummaryBatch(activeWeekStart, activeWeekEnd, mappedRows);
+  const upserted = await upsertTripsSummaryBatch(dbWeekStart, dbWeekEnd, mappedRows);
   const isLastBatch = batchIndex >= batches.length - 1;
   const isLastWeek = weekIndex >= weeks.length - 1;
 
   if (isLastBatch) {
     if (isLastWeek) {
-      await saveTripsSummarySyncMeta(activeWeekStart, activeWeekEnd, {
+      await saveTripsSummarySyncMeta(dbWeekStart, dbWeekEnd, {
         ...meta,
         syncProgress: "complete",
         lastBatchIndex: batchIndex,
         lastSyncAt: new Date().toISOString(),
         rowCountTotal: upserted,
+        syncEnd: fetchEnd,
       });
     } else {
       const nextWeek = weeks[weekIndex + 1];
-      await saveTripsSummarySyncMeta(activeWeekStart, activeWeekEnd, {
+      await saveTripsSummarySyncMeta(dbWeekStart, dbWeekEnd, {
         ...meta,
         syncProgress: "complete",
         lastBatchIndex: batchIndex,
         lastSyncAt: new Date().toISOString(),
+        syncEnd: fetchEnd,
       });
       await saveTripsSummarySyncMeta(nextWeek.from, nextWeek.to, {
         syncProgress: "in_progress",
@@ -1789,20 +1983,22 @@ export async function syncTripsSummaryBatch(params: {
         pendingWeeks: weeks,
         currentWeekIndex: weekIndex + 1,
         startedAt: new Date().toISOString(),
+        syncEnd: params.syncEnd,
       });
     }
   } else {
-    await saveTripsSummarySyncMeta(activeWeekStart, activeWeekEnd, {
+    await saveTripsSummarySyncMeta(dbWeekStart, dbWeekEnd, {
       ...meta,
       syncProgress: "in_progress",
       lastBatchIndex: batchIndex,
       lastSyncAt: new Date().toISOString(),
+      syncEnd: fetchEnd,
     });
   }
 
   return {
-    weekStart: activeWeekStart,
-    weekEnd: activeWeekEnd,
+    weekStart: dbWeekStart,
+    weekEnd: dbWeekEnd,
     batchIndex,
     batchCount: batches.length,
     rowCount: upserted,

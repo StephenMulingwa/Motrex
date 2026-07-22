@@ -51,6 +51,7 @@ export async function POST(request: Request) {
       intervalStart,
       intervalEnd,
       clearBeforeSync: unitIndex === 0,
+      clearMode: "overlap",
     });
     let nextIndex = unitIndex + 1;
 
@@ -59,6 +60,7 @@ export async function POST(request: Request) {
         intervalStart,
         intervalEnd,
         clearBeforeSync: false,
+        clearMode: "overlap",
       });
       nextIndex += 1;
     }

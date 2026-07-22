@@ -16,6 +16,7 @@ export interface ReportApiResponse {
   to: string;
   snapshotCount: number;
   totalRows?: number;
+  lastUpdatedAt?: string | null;
   rows: Record<string, unknown>[];
   pivot: Record<string, Record<string, number>>;
   columns: string[];

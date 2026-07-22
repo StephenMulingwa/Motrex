@@ -17,7 +17,6 @@ import PageHeader from "./PageHeader";
 import ChartBox from "./ChartBox";
 import { CategoryAxisTick } from "./CategoryAxisTick";
 import { useReportData } from "@/lib/useReportData";
-import { useTripsSummaryData } from "@/lib/useTripsSummaryData";
 import { exportMotrexReportPdf } from "@/lib/exportMotrexReportPdf";
 import { getUtilizationBand, UTILIZATION_BANDS } from "@/lib/utilizationBands";
 import {
@@ -40,6 +39,37 @@ import { formatTimeSince } from "@/lib/formatDuration";
 import { SELECTED_GEOFENCE_NAMES } from "@/lib/motrexGeofences";
 import type { YardsLiveDataset } from "@/lib/wialon/yards";
 import { registrationKey, registrationLabel, shouldUseRegistrationLabel } from "@/lib/vehicleLabels";
+
+function DatabaseLastUpdatedBar({
+  lastUpdatedAt,
+  note = "Daily pipeline starts at 12:00 AM EAT",
+}: {
+  lastUpdatedAt?: string | null;
+  note?: string;
+}) {
+  return (
+    <div
+      style={{
+        background: "linear-gradient(90deg, #ecfdf5 0%, #f0fdf4 100%)",
+        border: "1px solid #86efac",
+        borderRadius: 10,
+        padding: "12px 16px",
+        marginBottom: 14,
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        flexWrap: "wrap",
+        gap: 10,
+        boxShadow: "0 1px 2px rgba(22, 101, 52, 0.08)",
+      }}
+    >
+      <strong style={{ color: "#166534", fontSize: ".92rem" }}>
+        Last database update: {lastUpdatedAt ? lastUpdatedAt : "No data in selected range yet"}
+      </strong>
+      <span style={{ color: "#15803d", fontSize: ".78rem", fontWeight: 600 }}>{note}</span>
+    </div>
+  );
+}
 
 function TablePager({
   page,
@@ -567,22 +597,26 @@ interface YardsTabProps {
   data: YardsLiveDataset | null;
   loading: boolean;
   syncing?: boolean;
+  syncLabel?: string | null;
   error: string | null;
   onRefresh: () => void;
   onSyncFromTrack3: () => void;
   nowMs: number;
   lastExecutionTime: string;
+  lastUpdatedAt?: string | null;
 }
 
 export function YardsTab({
   data,
   loading,
   syncing = false,
+  syncLabel = null,
   error,
   onRefresh,
   onSyncFromTrack3,
   nowMs,
   lastExecutionTime,
+  lastUpdatedAt,
 }: YardsTabProps) {
   const [search, setSearch] = useState("");
   const [geofenceFilter, setGeofenceFilter] = useState("");
@@ -705,13 +739,17 @@ export function YardsTab({
           <button
             type="button"
             onClick={onSyncFromTrack3}
-            disabled={loading}
-            title="Fetch latest data from Track3 (may take several minutes)"
-            style={redButtonStyle(loading || syncing)}
+            disabled={syncing}
+            title="Discover vehicles inside geofences and sync last 30 days from Track3"
+            style={redButtonStyle(syncing)}
           >
-            {syncing ? "Syncing…" : "Sync from Track3"}
+            {syncing ? (syncLabel ?? "Syncing…") : "Sync from Track3"}
           </button>
         }
+      />
+      <DatabaseLastUpdatedBar
+        lastUpdatedAt={lastUpdatedAt}
+        note="Daily pipeline starts at 12:00 AM EAT"
       />
       <div
         style={{
@@ -781,11 +819,6 @@ export function YardsTab({
           </button>
         </div>
         {sorted.length > 0 && <ExportActions onExcel={exportExcel} onPdf={exportPdf} />}
-        {data && (
-          <p style={{ margin: "0 0 12px", color: "var(--text2)", fontSize: ".82rem", fontWeight: 700 }}>
-            Last Execution Time: {lastExecutionTime} · Last fetch: {formatEatNow()} · Updates daily 7:00 AM EAT · reads from database
-          </p>
-        )}
         {!data && !loading && !error && (
           <p style={{ margin: "0 0 12px", color: "var(--text2)", fontSize: ".82rem", fontWeight: 700 }}>
             No yards data yet — background sync will populate the database shortly.
@@ -848,6 +881,36 @@ export function YardsTab({
   );
 }
 
+function tripEventMs(row: Record<string, unknown>): number {
+  const keys = ["Departure Time", "Beginning", "Loading Departure", "Offloading Arrival", "Arrival Time"];
+  for (const key of keys) {
+    const ms = rowMs(row, key);
+    if (Number.isFinite(ms) && ms > 0) return ms;
+  }
+  return Number.NEGATIVE_INFINITY;
+}
+
+function tripInDateRange(row: Record<string, unknown>, fromDate: string, toDate: string): boolean {
+  const ms = tripEventMs(row);
+  if (!Number.isFinite(ms) || ms <= 0) return false;
+  const fromMs = Date.parse(`${fromDate}T00:00:00+03:00`);
+  const toMs = Date.parse(`${toDate}T23:59:59+03:00`);
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return true;
+  return ms >= fromMs && ms <= toMs;
+}
+
+function topVehiclesByTripCount(rows: Record<string, unknown>[], limit = 10): Array<{ name: string; value: number }> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const name = registrationLabel(String(row.Vehicle ?? "Unknown"));
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([name, value]) => ({ name, value }))
+    .sort((a, b) => b.value - a.value || a.name.localeCompare(b.name))
+    .slice(0, limit);
+}
+
 export function TripsTab() {
   const { data, loading, error, fromDate, toDate, setFromDate, setToDate, run } = useReportData("trips");
   const [vehicleSearch, setVehicleSearch] = useState("");
@@ -855,30 +918,34 @@ export function TripsTab() {
   const [offloadingZone, setOffloadingZone] = useState("all");
   const rows = useMemo(() => data?.rows ?? [], [data?.rows]);
 
+  const dateFilteredRows = useMemo(
+    () => rows.filter((row) => tripInDateRange(row, fromDate, toDate)),
+    [rows, fromDate, toDate],
+  );
+
   const loadingZones = useMemo(() => {
     const set = new Set<string>();
-    for (const row of rows) {
+    for (const row of dateFilteredRows) {
       const z = String(row["Loading Zone"] ?? row.From ?? "").trim();
       if (z) set.add(z);
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [rows]);
+  }, [dateFilteredRows]);
 
   const offloadingZones = useMemo(() => {
     const set = new Set<string>();
-    for (const row of rows) {
+    for (const row of dateFilteredRows) {
       const z = String(row["Offloading Zone"] ?? row.To ?? "").trim();
       if (z && /tororo|athi/i.test(z)) set.add(z);
       else if (z) set.add(z);
     }
-    // Always offer Tororo / Athi as primary offloading options
     set.add("Tororo");
     set.add("Athi River");
     return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [rows]);
+  }, [dateFilteredRows]);
 
   const filteredBase = useMemo(() => {
-    return rows.filter((row) => {
+    return dateFilteredRows.filter((row) => {
       if (String(row.Table ?? "") === "TAT") return false;
       const q = vehicleSearch.trim().toLowerCase();
       if (q && !registrationLabel(String(row.Vehicle ?? "")).toLowerCase().includes(q)) return false;
@@ -896,9 +963,9 @@ export function TripsTab() {
       }
       return true;
     });
-  }, [rows, vehicleSearch, loadingZone, offloadingZone]);
+  }, [dateFilteredRows, vehicleSearch, loadingZone, offloadingZone]);
 
-  const outboundRawRows = useMemo(
+  const outboundRows = useMemo(
     () =>
       filteredBase.filter(
         (row) =>
@@ -907,7 +974,7 @@ export function TripsTab() {
       ),
     [filteredBase],
   );
-  const inboundRawRows = useMemo(
+  const inboundRows = useMemo(
     () =>
       filteredBase.filter(
         (row) =>
@@ -916,8 +983,6 @@ export function TripsTab() {
       ),
     [filteredBase],
   );
-  const outboundRows = outboundRawRows;
-  const inboundRows = inboundRawRows;
   const outboundDisplayRows = useMemo<Record<string, unknown>[]>(
     () =>
       outboundRows.map((row) => ({
@@ -965,7 +1030,8 @@ export function TripsTab() {
           parseFirstNumber(String(outbound.Mileage ?? "")) + parseFirstNumber(String(returnLeg.Mileage ?? ""));
         return {
           Vehicle: vehicle,
-          "Trip Counts": 1,
+          "Loading Zone": outbound["Loading Zone"] ?? outbound.From ?? "",
+          "Offloading Zone": outbound["Offloading Zone"] ?? outbound.To ?? "",
           "Loading Departure": outbound["Departure Time"] ?? "",
           "Offloading Arrival": outbound["Arrival Time"] ?? "",
           "Offloading Departure": returnLeg["Departure Time"] ?? "",
@@ -982,13 +1048,17 @@ export function TripsTab() {
       .filter((row) => row !== null)
       .map((row) => row as Record<string, unknown>);
   }, [outboundRows, inboundRows]);
+
+  const topOutbound = useMemo(() => topVehiclesByTripCount(outboundRows), [outboundRows]);
+  const topInbound = useMemo(() => topVehiclesByTripCount(inboundRows), [inboundRows]);
+  const topTat = useMemo(() => topVehiclesByTripCount(tatRows), [tatRows]);
+
   const tripCount = outboundRows.length + inboundRows.length;
   const tripColumns = useMemo(
     () => [
       "Vehicle",
       "Loading Zone",
       "Offloading Zone",
-      "Trip Count",
       "Departure Time",
       "Arrival Time",
       "Distance",
@@ -1001,7 +1071,8 @@ export function TripsTab() {
   const tatColumns = useMemo(
     () => [
       "Vehicle",
-      "Trip Counts",
+      "Loading Zone",
+      "Offloading Zone",
       "Loading Departure",
       "Offloading Arrival",
       "Offloading Departure",
@@ -1020,6 +1091,9 @@ export function TripsTab() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rowsForColumns(outboundDisplayRows, tripColumns)), "Outbound");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rowsForColumns(inboundDisplayRows, tripColumns)), "Inbound");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rowsForColumns(tatRows, tatColumns)), "TAT");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(topOutbound), "Top Outbound");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(topInbound), "Top Inbound");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(topTat), "Top TAT");
     XLSX.writeFile(wb, `Motrex_Group_Trips_${fromDate}_${toDate}.xlsx`);
   };
   const exportPdf = () => {
@@ -1050,6 +1124,17 @@ export function TripsTab() {
         titleAccent="Trips"
         subtitle="Trips between Motrex, Multiple, and Vipingo yards and Tororo or Athi"
         right={<DateRangeBar fromDate={fromDate} toDate={toDate} setFromDate={setFromDate} setToDate={setToDate} onRun={run} loading={loading} header />}
+      />
+      <DatabaseLastUpdatedBar
+        lastUpdatedAt={data?.lastUpdatedAt}
+        note="Daily pipeline starts at 12:00 AM EAT · last 14 days"
+      />
+      <MonthWeekFilter
+        fromDate={fromDate}
+        setFromDate={setFromDate}
+        setToDate={setToDate}
+        onApply={(from, to) => run(from, to)}
+        loading={loading}
       />
       <div
         style={{
@@ -1118,8 +1203,14 @@ export function TripsTab() {
               ]}
             />
             <p style={{ margin: 0, color: "var(--text2)", fontSize: ".82rem", fontWeight: 600 }}>
-              {tripCount} trip(s): {outboundRows.length} outbound · {inboundRows.length} inbound · {tatRows.length} TAT row(s)
+              {fromDate} → {toDate} · {tripCount} trip(s): {outboundRows.length} outbound · {inboundRows.length} inbound ·{" "}
+              {tatRows.length} TAT row(s)
             </p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
+              <ChartPanel title="Top 10 Vehicles — Outbound Trips" data={topOutbound} />
+              <ChartPanel title="Top 10 Vehicles — Inbound Trips" data={topInbound} />
+              <ChartPanel title="Top 10 Vehicles — Round-Trip TAT" data={topTat} />
+            </div>
             <section>
               <h3 style={{ margin: "0 0 10px", fontSize: "1.02rem", color: "var(--text)", fontWeight: 900 }}>Outbound</h3>
               <SimpleTable rows={outboundDisplayRows} columnOrder={tripColumns} />
@@ -1146,18 +1237,8 @@ function formatMetric(value: number, unit: string): string {
 }
 
 export function TripsSummaryTab() {
-  const {
-    data,
-    loading,
-    syncing,
-    error,
-    fromDate,
-    toDate,
-    setFromDate,
-    setToDate,
-    run,
-    applyWeek,
-  } = useTripsSummaryData();
+  const { data, loading, error, fromDate, toDate, setFromDate, setToDate, run } =
+    useReportData("trips_summary");
   const [vehicleSearch, setVehicleSearch] = useState("");
   const summaryRows = useMemo(() => {
     const rows = data?.rows ?? [];
@@ -1266,7 +1347,7 @@ export function TripsSummaryTab() {
       ],
     });
   };
-  const busy = loading || syncing;
+  const busy = loading;
 
   return (
     <div>
@@ -1286,11 +1367,15 @@ export function TripsSummaryTab() {
           />
         }
       />
+      <DatabaseLastUpdatedBar
+        lastUpdatedAt={data?.lastUpdatedAt}
+        note="Daily pipeline starts at 12:00 AM EAT"
+      />
       <MonthWeekFilter
         fromDate={fromDate}
         setFromDate={setFromDate}
         setToDate={setToDate}
-        onApply={(from, to) => applyWeek(from, to)}
+        onApply={(from, to) => run(from, to)}
         loading={busy}
       />
       <div
@@ -1303,11 +1388,6 @@ export function TripsSummaryTab() {
         }}
       >
         {error && <p style={{ color: "var(--red)", marginBottom: 12 }}>{error}</p>}
-        {syncing && (
-          <p style={{ color: "var(--text2)", marginBottom: 12 }}>
-            {data?.syncStatus ?? "Syncing from Track3…"}
-          </p>
-        )}
         {loading && !data ? (
           <p style={{ color: "var(--text2)" }}>Preparing report data…</p>
         ) : (
@@ -1474,6 +1554,7 @@ export function UtilizationTab() {
         subtitle="Daily distance pivot from Track3 utilization report"
         right={<DateRangeBar fromDate={fromDate} toDate={toDate} setFromDate={setFromDate} setToDate={setToDate} onRun={run} loading={loading} header />}
       />
+      <DatabaseLastUpdatedBar lastUpdatedAt={data?.lastUpdatedAt} />
       <MonthWeekFilter
         fromDate={fromDate}
         setFromDate={setFromDate}
@@ -1581,6 +1662,7 @@ export function EcoDrivingTab() {
         subtitle="Violation counts by vehicle"
         right={<DateRangeBar fromDate={fromDate} toDate={toDate} setFromDate={setFromDate} setToDate={setToDate} onRun={run} loading={loading} header />}
       />
+      <DatabaseLastUpdatedBar lastUpdatedAt={data?.lastUpdatedAt} />
       <MonthWeekFilter
         fromDate={fromDate}
         setFromDate={setFromDate}

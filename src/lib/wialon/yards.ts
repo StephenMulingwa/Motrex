@@ -12,6 +12,7 @@ export interface YardsLiveDataset {
   insideRows?: YardsInsideRow[];
   fetchedAt: string;
   lastExecutionTime: string;
+  lastUpdatedAt?: string | null;
   range: { from: string; to: string };
   syncPending?: boolean;
 }
